@@ -22,7 +22,7 @@ async function loadTeamsCache() {
         headers: { 'X-Auth-Token': footballApiKey }
       });
       teamsCache.push(...res.data.teams);
-      await new Promise(r => setTimeout(r, 6500)); // respecte le rate limit (10 req/min)
+      await new Promise(r => setTimeout(r, 6500));
     } catch (err) {
       console.error(`Erreur chargement ${comp}:`, err.response?.status || err.message);
     }
@@ -77,6 +77,48 @@ async function getLiveMatches() {
     params: { status: 'LIVE' }
   });
   return res.data.matches || [];
+}
+
+async function getMatchesByDate(dateStr) {
+  const res = await axios.get('https://api.football-data.org/v4/matches', {
+    headers: { 'X-Auth-Token': footballApiKey },
+    params: { dateFrom: dateStr, dateTo: dateStr }
+  });
+  return res.data.matches || [];
+}
+
+function formatMatchesMessage(matches, dateLabel) {
+  if (matches.length === 0) {
+    return `Aucun match prévu le ${dateLabel} dans les compétitions suivies.`;
+  }
+
+  const byCompetition = {};
+  matches.forEach(m => {
+    const comp = m.competition.name;
+    if (!byCompetition[comp]) byCompetition[comp] = [];
+    byCompetition[comp].push(m);
+  });
+
+  let text = `📅 Matchs du ${dateLabel} :\n\n`;
+  for (const comp in byCompetition) {
+    text += `🏆 ${comp}\n`;
+    byCompetition[comp].forEach(m => {
+      const time = new Date(m.utcDate).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+      const status = m.status === 'FINISHED'
+        ? `${m.score.fullTime.home}-${m.score.fullTime.away}`
+        : m.status === 'IN_PLAY' || m.status === 'PAUSED'
+        ? `🔴 ${m.score.fullTime.home ?? 0}-${m.score.fullTime.away ?? 0}`
+        : time;
+      text += `  ${m.homeTeam.name} vs ${m.awayTeam.name} — ${status}\n`;
+    });
+    text += '\n';
+  }
+
+  if (text.length > 4000) {
+    text = text.slice(0, 4000) + '\n...(liste tronquée, trop de matchs)';
+  }
+
+  return text;
 }
 
 // ==================== CALCULS STATS ====================
@@ -147,8 +189,10 @@ bot.command('start', (ctx) => {
     "⚽ Salut ! Je suis ton bot d'analyse foot.\n\n" +
     "Commandes disponibles :\n" +
     "/match <équipe> - prochain match d'une équipe\n" +
-    "/live - scores en direct\n\n" +
-    "Ou envoie directement : Équipe1 vs Équipe2\n" +
+    "/live - scores en direct\n" +
+    "/today - tous les matchs du jour\n\n" +
+    "Envoie une date (JJ/MM/AAAA) pour voir les matchs de ce jour-là.\n" +
+    "Ou envoie : Équipe1 vs Équipe2\n" +
     "pour une analyse complète du duel."
   );
 });
@@ -170,6 +214,17 @@ bot.command('live', async (ctx) => {
   } catch (error) {
     console.error(error.response?.data || error.message);
     return ctx.reply("Erreur lors de la récupération des matchs.");
+  }
+});
+
+bot.command('today', async (ctx) => {
+  try {
+    const today = new Date().toISOString().split('T')[0];
+    const matches = await getMatchesByDate(today);
+    return ctx.reply(formatMatchesMessage(matches, "aujourd'hui"));
+  } catch (error) {
+    console.error(error.response?.data || error.message);
+    return ctx.reply("Erreur lors de la récupération des matchs du jour.");
   }
 });
 
@@ -199,6 +254,27 @@ bot.command('match', async (ctx) => {
   } catch (error) {
     console.error(error.response?.data || error.message);
     return ctx.reply("Erreur lors de la récupération des infos.");
+  }
+});
+
+// ==================== DÉTECTION DE DATE ====================
+
+bot.hears(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/, async (ctx) => {
+  const [, day, month, year] = ctx.match;
+  const dateStr = `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
+
+  const parsedDate = new Date(dateStr);
+  if (isNaN(parsedDate.getTime())) {
+    return ctx.reply("Date invalide. Utilise le format JJ/MM/AAAA, par exemple 20/09/2026.");
+  }
+
+  try {
+    const matches = await getMatchesByDate(dateStr);
+    const dateLabel = parsedDate.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' });
+    return ctx.reply(formatMatchesMessage(matches, dateLabel));
+  } catch (error) {
+    console.error(error.response?.data || error.message);
+    return ctx.reply("Erreur lors de la récupération des matchs pour cette date.");
   }
 });
 
