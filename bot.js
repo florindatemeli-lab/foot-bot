@@ -72,19 +72,35 @@ async function getHeadToHead(teamAId, teamBId) {
 }
 
 async function getLiveMatches() {
-  const res = await axios.get('https://api.football-data.org/v4/matches', {
-    headers: { 'X-Auth-Token': footballApiKey },
-    params: { status: 'LIVE' }
-  });
-  return res.data.matches || [];
+  let allMatches = [];
+  for (const comp of COMPETITIONS) {
+    try {
+      const res = await axios.get(`https://api.football-data.org/v4/competitions/${comp}/matches`, {
+        headers: { 'X-Auth-Token': footballApiKey },
+        params: { status: 'LIVE' }
+      });
+      allMatches.push(...(res.data.matches || []));
+    } catch (err) {
+      console.error(`Erreur live ${comp}:`, err.response?.status || err.message);
+    }
+  }
+  return allMatches;
 }
 
 async function getMatchesByDate(dateStr) {
-  const res = await axios.get('https://api.football-data.org/v4/matches', {
-    headers: { 'X-Auth-Token': footballApiKey },
-    params: { dateFrom: dateStr, dateTo: dateStr }
-  });
-  return res.data.matches || [];
+  let allMatches = [];
+  for (const comp of COMPETITIONS) {
+    try {
+      const res = await axios.get(`https://api.football-data.org/v4/competitions/${comp}/matches`, {
+        headers: { 'X-Auth-Token': footballApiKey },
+        params: { dateFrom: dateStr, dateTo: dateStr }
+      });
+      allMatches.push(...(res.data.matches || []));
+    } catch (err) {
+      console.error(`Erreur récupération matchs ${comp}:`, err.response?.status || err.message);
+    }
+  }
+  return allMatches;
 }
 
 function formatMatchesMessage(matches, dateLabel) {
@@ -347,4 +363,3 @@ loadTeamsCache().then(() => {
   bot.startPolling();
   console.log('Bot en écoute.');
 });
-// redeploy trigger
