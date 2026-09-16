@@ -347,3 +347,4 @@ loadTeamsCache().then(() => {
   bot.startPolling();
   console.log('Bot en écoute.');
 });
+// redeploy trigger
