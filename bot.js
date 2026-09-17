@@ -1,867 +1,369 @@
 require('dotenv').config();
-
-const TelegramBot = require('node-telegram-bot-api');
+const { Bot } = require('node-telegram-bot-api');
 const axios = require('axios');
 
-// =====================================================
-// CONFIGURATION
-// =====================================================
+const token = process.env.TELEGRAM_TOKEN;
+const footballApiKey = process.env.FOOTBALL_API_KEY;
 
-const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
-const FOOTBALL_API_KEY = process.env.FOOTBALL_API_KEY;
+const bot = new Bot(token);
 
-if (!TELEGRAM_TOKEN) {
-  console.error("❌ TELEGRAM_TOKEN manquant dans .env");
-  process.exit(1);
-}
+console.log('Bot démarré...');
 
-if (!FOOTBALL_API_KEY) {
-  console.error("❌ FOOTBALL_API_KEY manquant dans .env");
-  process.exit(1);
-}
+// ==================== CACHE DES ÉQUIPES ====================
 
-const bot = new TelegramBot(TELEGRAM_TOKEN, {
-  polling: true
+const COMPETITIONS = ['PL', 'PD', 'BL1', 'SA', 'FL1', 'CL', 'DED', 'PPL', 'ELC'];
+let teamsCache = [];
+
+async function loadTeamsCache() {
+console.log('Chargement du cache des équipes...');
+for (const comp of COMPETITIONS) {
+try {
+const res = await axios.get(https://api.football-data.org/v4/competitions/${comp}/teams, {
+headers: { 'X-Auth-Token': footballApiKey }
 });
-
-const API_URL = 'https://v3.football.api-sports.io';
-
-const api = axios.create({
-  baseURL: API_URL,
-  headers: {
-    'x-apisports-key': FOOTBALL_API_KEY,
-    'Accept': 'application/json'
-  },
-  timeout: 15000
-});
-
-console.log('🤖 Bot Telegram démarré...');
-
-// =====================================================
-// OUTILS
-// =====================================================
-
-function normalize(text) {
-  return String(text)
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .trim();
+teamsCache.push(...res.data.teams);
+await new Promise(r => setTimeout(r, 6500));
+} catch (err) {
+console.error(Erreur chargement ${comp}:, err.response?.status || err.message);
+}
+}
+console.log(Cache chargé : ${teamsCache.length} équipes.);
 }
 
-function formatDate(date) {
-  return new Intl.DateTimeFormat('fr-FR', {
-    timeZone: 'Africa/Douala',
-    dateStyle: 'full',
-    timeStyle: 'short'
-  }).format(new Date(date));
+function normalize(str) {
+return str.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 }
-
-function shortDate(date) {
-  return new Intl.DateTimeFormat('fr-FR', {
-    timeZone: 'Africa/Douala',
-    day: '2-digit',
-    month: '2-digit',
-    year: 'numeric'
-  }).format(new Date(date));
-}
-
-function getTeamName(fixture, side) {
-  return fixture.teams?.[side]?.name || 'Inconnu';
-}
-
-function getScore(fixture, side) {
-  return fixture.goals?.[side] ?? '-';
-}
-
-// =====================================================
-// APPEL API
-// =====================================================
-
-async function apiGet(endpoint, params = {}) {
-  try {
-    const response = await api.get(endpoint, { params });
-
-    if (response.data?.errors && Object.keys(response.data.errors).length > 0) {
-      throw new Error(JSON.stringify(response.data.errors));
-    }
-
-    return response.data;
-  } catch (error) {
-    if (error.response) {
-      console.error(
-        `API ${error.response.status}:`,
-        error.response.data
-      );
-    } else {
-      console.error('Erreur API:', error.message);
-    }
-
-    throw error;
-  }
-}
-
-// =====================================================
-// RECHERCHE D'ÉQUIPE
-// =====================================================
 
 async function findTeam(name) {
-  const data = await apiGet('/teams', {
-    search: name
-  });
-
-  if (!data.response || data.response.length === 0) {
-    return null;
-  }
-
-  const query = normalize(name);
-
-  // Recherche exacte en priorité
-  const exact = data.response.find(item => {
-    return normalize(item.team.name) === query;
-  });
-
-  if (exact) {
-    return exact.team;
-  }
-
-  // Sinon recherche approximative
-  const approximate = data.response.find(item => {
-    const teamName = normalize(item.team.name);
-
-    return (
-      teamName.includes(query) ||
-      query.includes(teamName)
-    );
-  });
-
-  return approximate?.team || data.response[0]?.team || null;
+const query = normalize(name);
+return teamsCache.find(t =>
+normalize(t.name).includes(query) ||
+normalize(t.shortName || '').includes(query) ||
+normalize(t.tla || '').includes(query)
+) || null;
 }
 
-// =====================================================
-// PROCHAINS MATCHS D'UNE ÉQUIPE
-// =====================================================
-
-async function getNextMatches(teamId, limit = 5) {
-  const data = await apiGet('/fixtures', {
-    team: teamId,
-    next: limit
-  });
-
-  return data.response || [];
-}
-
-// =====================================================
-// DERNIERS MATCHS D'UNE ÉQUIPE
-// =====================================================
+// ==================== UTILITAIRES API ====================
 
 async function getRecentMatches(teamId, limit = 5) {
-  const data = await apiGet('/fixtures', {
-    team: teamId,
-    last: limit
-  });
-
-  return data.response || [];
+const res = await axios.get(https://api.football-data.org/v4/teams/${teamId}/matches, {
+headers: { 'X-Auth-Token': footballApiKey },
+params: { status: 'FINISHED', limit }
+});
+return res.data.matches || [];
 }
 
-// =====================================================
-// MATCHS D'UNE DATE
-// =====================================================
-
-async function getMatchesByDate(date) {
-  const data = await apiGet('/fixtures', {
-    date
-  });
-
-  return data.response || [];
+async function getNextMatch(teamId) {
+const res = await axios.get(https://api.football-data.org/v4/teams/${teamId}/matches, {
+headers: { 'X-Auth-Token': footballApiKey },
+params: { status: 'SCHEDULED', limit: 1 }
+});
+return res.data.matches?.[0] || null;
 }
 
-// =====================================================
-// MATCHS EN DIRECT
-// =====================================================
+async function getHeadToHead(teamAId, teamBId) {
+const res = await axios.get(https://api.football-data.org/v4/teams/${teamAId}/matches, {
+headers: { 'X-Auth-Token': footballApiKey },
+params: { status: 'FINISHED', limit: 50 }
+});
+return (res.data.matches || [])
+.filter(m => m.homeTeam.id === teamBId || m.awayTeam.id === teamBId)
+.slice(0, 5);
+}
 
 async function getLiveMatches() {
-  const data = await apiGet('/fixtures', {
-    live: 'all'
-  });
-
-  return data.response || [];
+let allMatches = [];
+for (const comp of COMPETITIONS) {
+try {
+const res = await axios.get(https://api.football-data.org/v4/competitions/${comp}/matches, {
+headers: { 'X-Auth-Token': footballApiKey },
+params: { status: 'LIVE' }
+});
+allMatches.push(...(res.data.matches || []));
+} catch (err) {
+console.error(Erreur live ${comp}:, err.response?.status || err.message);
+}
+}
+return allMatches;
 }
 
-// =====================================================
-// H2H
-// =====================================================
-
-async function getHeadToHead(teamA, teamB, limit = 5) {
-  const data = await apiGet('/fixtures/headtohead', {
-    h2h: `${teamA}-${teamB}`,
-    last: limit
-  });
-
-  return data.response || [];
+async function getMatchesByDate(dateStr) {
+let allMatches = [];
+for (const comp of COMPETITIONS) {
+try {
+const res = await axios.get(https://api.football-data.org/v4/competitions/${comp}/matches, {
+headers: { 'X-Auth-Token': footballApiKey },
+params: { dateFrom: dateStr, dateTo: dateStr }
+});
+allMatches.push(...(res.data.matches || []));
+} catch (err) {
+console.error(Erreur récupération matchs ${comp}:, err.response?.status || err.message);
+}
+}
+return allMatches;
 }
 
-// =====================================================
-// STATISTIQUES D'UN MATCH
-// =====================================================
-
-async function getFixtureStatistics(fixtureId) {
-  const data = await apiGet('/fixtures/statistics', {
-    fixture: fixtureId
-  });
-
-  return data.response || [];
+function formatMatchesMessage(matches, dateLabel) {
+if (matches.length === 0) {
+return Aucun match prévu le ${dateLabel} dans les compétitions suivies.;
 }
 
-// =====================================================
-// CALCUL DE LA FORME
-// =====================================================
-
-function calculateForm(matches, teamId) {
-  let wins = 0;
-  let draws = 0;
-  let losses = 0;
-
-  let goalsFor = 0;
-  let goalsAgainst = 0;
-
-  const form = [];
-
-  for (const match of matches) {
-    const isHome = match.teams.home.id === teamId;
-
-    const gf = isHome
-      ? match.goals.home
-      : match.goals.away;
-
-    const ga = isHome
-      ? match.goals.away
-      : match.goals.home;
-
-    if (gf == null || ga == null) continue;
-
-    goalsFor += gf;
-    goalsAgainst += ga;
-
-    if (gf > ga) {
-      wins++;
-      form.push('V');
-    } else if (gf === ga) {
-      draws++;
-      form.push('N');
-    } else {
-      losses++;
-      form.push('D');
-    }
-  }
-
-  const total = wins + draws + losses || 1;
-
-  return {
-    wins,
-    draws,
-    losses,
-    form: form.join(''),
-    goalsFor,
-    goalsAgainst,
-    avgGoalsFor: (goalsFor / total).toFixed(2),
-    avgGoalsAgainst: (goalsAgainst / total).toFixed(2)
-  };
-}
-
-// =====================================================
-// FORMAT H2H
-// =====================================================
-
-function formatH2H(matches) {
-  if (!matches.length) {
-    return 'Aucune confrontation récente trouvée.';
-  }
-
-  return matches.map(match => {
-    const home = getTeamName(match, 'home');
-    const away = getTeamName(match, 'away');
-
-    const homeScore = getScore(match, 'home');
-    const awayScore = getScore(match, 'away');
-
-    return (
-      `• ${shortDate(match.fixture.date)} : ` +
-      `${home} ${homeScore}-${awayScore} ${away}`
-    );
-  }).join('\n');
-}
-
-// =====================================================
-// FORMAT MATCHS
-// =====================================================
-
-function formatMatch(match) {
-  const home = getTeamName(match, 'home');
-  const away = getTeamName(match, 'away');
-
-  const status = match.fixture.status.short;
-
-  let score = '';
-
-  if (
-    ['FT', 'AET', 'PEN', 'HT', '1H', '2H'].includes(status)
-  ) {
-    score =
-      `${getScore(match, 'home')}-${getScore(match, 'away')}`;
-  }
-
-  return (
-    `⚽ ${home} - ${away}\n` +
-    `🕐 ${formatDate(match.fixture.date)}\n` +
-    `📊 Statut : ${match.fixture.status.long}` +
-    (score ? `\n🔢 Score : ${score}` : '')
-  );
-}
-
-// =====================================================
-// /START
-// =====================================================
-
-bot.onText(/\/start/, async (msg) => {
-
-  const text =
-`⚽ Bienvenue sur mon bot d'analyse football !
-
-Commandes disponibles :
-
-/match <équipe>
-➡️ Prochains matchs d'une équipe
-
-/recent <équipe>
-➡️ Derniers matchs et forme récente
-
-/live
-➡️ Matchs actuellement en direct
-
-/today
-➡️ Matchs du jour
-
-/analyse <équipe1> vs <équipe2>
-➡️ Analyse statistique du duel
-
-/date JJ/MM/AAAA
-➡️ Matchs d'une date précise
-
-Exemple :
-
-/match Real Madrid
-
-/recent Barcelona
-
-/analyse Real Madrid vs Barcelona
-
-/date 20/09/2026
-`;
-
-  await bot.sendMessage(msg.chat.id, text);
+const byCompetition = {};
+matches.forEach(m => {
+const comp = m.competition.name;
+if (!byCompetition[comp]) byCompetition[comp] = [];
+byCompetition[comp].push(m);
 });
 
-// =====================================================
-// /MATCH
-// =====================================================
+let text = 📅 Matchs du ${dateLabel} :\n\n;
+for (const comp in byCompetition) {
+text += 🏆 ${comp}\n;
+byCompetition[comp].forEach(m => {
+const time = new Date(m.utcDate).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+const status = m.status === 'FINISHED'
+? ${m.score.fullTime.home}-${m.score.fullTime.away}
+: m.status === 'IN_PLAY' || m.status === 'PAUSED'
+? 🔴 ${m.score.fullTime.home ?? 0}-${m.score.fullTime.away ?? 0}
+: time;
+text +=   ${m.homeTeam.name} vs ${m.awayTeam.name} — ${status}\n;
+});
+text += '\n';
+}
 
-bot.onText(/\/match(?:\s+(.+))?/i, async (msg, match) => {
+if (text.length > 4000) {
+text = text.slice(0, 4000) + '\n...(liste tronquée, trop de matchs)';
+}
 
-  const chatId = msg.chat.id;
-  const name = match[1]?.trim();
+return text;
+}
 
-  if (!name) {
-    return bot.sendMessage(
-      chatId,
-      'Utilisation : /match Real Madrid'
-    );
-  }
+// ==================== CALCULS STATS ====================
 
-  try {
+function computeStats(matches, teamId) {
+let wins = 0, draws = 0, losses = 0, goalsFor = 0, goalsAgainst = 0;
+let homeFor = 0, homeAgainst = 0, homeCount = 0;
+let awayFor = 0, awayAgainst = 0, awayCount = 0;
+let form = '';
 
-    await bot.sendMessage(
-      chatId,
-      `🔎 Recherche de ${name}...`
-    );
+matches.forEach(m => {
+const isHome = m.homeTeam.id === teamId;
+const gf = isHome ? m.score.fullTime.home : m.score.fullTime.away;
+const ga = isHome ? m.score.fullTime.away : m.score.fullTime.home;
 
-    const team = await findTeam(name);
+goalsFor += gf; goalsAgainst += ga;  
+if (isHome) { homeCount++; homeFor += gf; homeAgainst += ga; }  
+else { awayCount++; awayFor += gf; awayAgainst += ga; }  
 
-    if (!team) {
-      return bot.sendMessage(
-        chatId,
-        `❌ Équipe "${name}" introuvable.`
-      );
-    }
+if (gf > ga) { wins++; form += 'V'; }  
+else if (gf === ga) { draws++; form += 'N'; }  
+else { losses++; form += 'D'; }
 
-    const matches = await getNextMatches(team.id, 5);
-
-    if (!matches.length) {
-      return bot.sendMessage(
-        chatId,
-        `Aucun prochain match trouvé pour ${team.name}.`
-      );
-    }
-
-    let text =
-      `⚽ ${team.name}\n\n` +
-      `📅 Prochains matchs :\n\n`;
-
-    matches.forEach((m, index) => {
-
-      text +=
-        `${index + 1}. ` +
-        `${m.teams.home.name} vs ${m.teams.away.name}\n` +
-        `🕐 ${formatDate(m.fixture.date)}\n` +
-        `🏆 ${m.league.name}\n\n`;
-    });
-
-    return bot.sendMessage(chatId, text);
-
-  } catch (error) {
-
-    return bot.sendMessage(
-      chatId,
-      '❌ Impossible de récupérer les prochains matchs.'
-    );
-  }
 });
 
-// =====================================================
-// /RECENT
-// =====================================================
+const count = matches.length || 1;
 
-bot.onText(/\/recent(?:\s+(.+))?/i, async (msg, match) => {
+return {
+wins, draws, losses, form,
+avgFor: (goalsFor / count).toFixed(1),
+avgAgainst: (goalsAgainst / count).toFixed(1),
+homeAvgFor: homeCount ? (homeFor / homeCount).toFixed(1) : 'N/A',
+homeAvgAgainst: homeCount ? (homeAgainst / homeCount).toFixed(1) : 'N/A',
+awayAvgFor: awayCount ? (awayFor / awayCount).toFixed(1) : 'N/A',
+awayAvgAgainst: awayCount ? (awayAgainst / awayCount).toFixed(1) : 'N/A',
+};
+}
 
-  const chatId = msg.chat.id;
-  const name = match[1]?.trim();
+function factorial(n) { return n <= 1 ? 1 : n * factorial(n - 1); }
+function poisson(lambda, k) { return (Math.pow(lambda, k) * Math.exp(-lambda)) / factorial(k); }
 
-  if (!name) {
-    return bot.sendMessage(
-      chatId,
-      'Utilisation : /recent Real Madrid'
-    );
-  }
+function estimateProbabilities(avgA, avgB) {
+const lambdaA = parseFloat(avgA) || 1;
+const lambdaB = parseFloat(avgB) || 1;
+let homeWin = 0, draw = 0, awayWin = 0, over25 = 0, btts = 0;
 
-  try {
+for (let i = 0; i <= 6; i++) {
+for (let j = 0; j <= 6; j++) {
+const p = poisson(lambdaA, i) * poisson(lambdaB, j);
+if (i > j) homeWin += p; else if (i === j) draw += p; else awayWin += p;
+if (i + j > 2) over25 += p;
+if (i > 0 && j > 0) btts += p;
+}
+}
 
-    const team = await findTeam(name);
+return {
+homeWin: (homeWin * 100).toFixed(0),
+draw: (draw * 100).toFixed(0),
+awayWin: (awayWin * 100).toFixed(0),
+over25: (over25 * 100).toFixed(0),
+btts: (btts * 100).toFixed(0),
+};
+}
 
-    if (!team) {
-      return bot.sendMessage(
-        chatId,
-        `❌ Équipe "${name}" introuvable.`
-      );
-    }
+// ==================== COMMANDES ====================
 
-    const matches = await getRecentMatches(team.id, 5);
-
-    const stats = calculateForm(matches, team.id);
-
-    let text =
-`📊 ${team.name}
-
-📈 FORME — 5 derniers matchs
-${stats.form || 'N/A'}
-
-🟢 Victoires : ${stats.wins}
-🟡 Nuls : ${stats.draws}
-🔴 Défaites : ${stats.losses}
-
-⚽ Buts marqués : ${stats.goalsFor}
-🥅 Buts encaissés : ${stats.goalsAgainst}
-
-📊 Moyenne buts marqués : ${stats.avgGoalsFor}
-📊 Moyenne buts encaissés : ${stats.avgGoalsAgainst}
-
-📝 Derniers matchs :
-
-`;
-
-    matches.forEach(m => {
-      text +=
-        `${m.teams.home.name} ` +
-        `${m.goals.home ?? '-'}-${m.goals.away ?? '-'} ` +
-        `${m.teams.away.name}\n`;
-    });
-
-    return bot.sendMessage(chatId, text);
-
-  } catch (error) {
-
-    return bot.sendMessage(
-      chatId,
-      '❌ Erreur pendant la récupération des statistiques.'
-    );
-  }
+bot.command('start', (ctx) => {
+return ctx.reply(
+"⚽ Salut ! Je suis ton bot d'analyse foot.\n\n" +
+"Commandes disponibles :\n" +
+"/match <équipe> - prochain match d'une équipe\n" +
+"/live - scores en direct\n" +
+"/today - tous les matchs du jour\n\n" +
+"Envoie une date (JJ/MM/AAAA) pour voir les matchs de ce jour-là.\n" +
+"Ou envoie : Équipe1 vs Équipe2\n" +
+"pour une analyse complète du duel."
+);
 });
 
-// =====================================================
-// /LIVE
-// =====================================================
+bot.command('live', async (ctx) => {
+try {
+const matches = await getLiveMatches();
 
-bot.onText(/\/live/, async (msg) => {
+if (matches.length === 0) {  
+  return ctx.reply("Aucun match en direct actuellement.");  
+}  
 
-  const chatId = msg.chat.id;
+let text = "🔴 Matchs en direct :\n\n";  
+matches.forEach(m => {  
+  text += `${m.homeTeam.name} ${m.score.fullTime.home ?? 0} - ${m.score.fullTime.away ?? 0} ${m.awayTeam.name}\n`;  
+});  
 
-  try {
+return ctx.reply(text);
 
-    const matches = await getLiveMatches();
-
-    if (!matches.length) {
-      return bot.sendMessage(
-        chatId,
-        '🔴 Aucun match en direct actuellement.'
-      );
-    }
-
-    let text = '🔴 MATCHS EN DIRECT\n\n';
-
-    matches.slice(0, 30).forEach(match => {
-
-      const status = match.fixture.status.short;
-
-      text +=
-        `⚽ ${match.teams.home.name} ` +
-        `${match.goals.home ?? 0}-${match.goals.away ?? 0} ` +
-        `${match.teams.away.name}\n` +
-        `⏱️ ${status}`;
-
-      if (match.fixture.status.elapsed) {
-        text += ` ${match.fixture.status.elapsed}'`;
-      }
-
-      text += '\n\n';
-    });
-
-    return bot.sendMessage(chatId, text);
-
-  } catch (error) {
-
-    return bot.sendMessage(
-      chatId,
-      '❌ Erreur lors de la récupération des matchs en direct.'
-    );
-  }
+} catch (error) {
+console.error(error.response?.data || error.message);
+return ctx.reply("Erreur lors de la récupération des matchs.");
+}
 });
 
-// =====================================================
-// /TODAY
-// =====================================================
-
-bot.onText(/\/today/, async (msg) => {
-
-  const chatId = msg.chat.id;
-
-  try {
-
-    const today = new Intl.DateTimeFormat(
-      'en-CA',
-      {
-        timeZone: 'Africa/Douala',
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit'
-      }
-    ).format(new Date());
-
-    const matches = await getMatchesByDate(today);
-
-    if (!matches.length) {
-      return bot.sendMessage(
-        chatId,
-        '📅 Aucun match trouvé aujourd’hui.'
-      );
-    }
-
-    let text =
-      `📅 MATCHS DU ${today}\n\n`;
-
-    matches.slice(0, 40).forEach(m => {
-
-      text +=
-        `🏆 ${m.league.name}\n` +
-        `⚽ ${m.teams.home.name} vs ${m.teams.away.name}\n` +
-        `🕐 ${formatDate(m.fixture.date)}\n\n`;
-    });
-
-    if (text.length > 4000) {
-      text = text.substring(0, 3900) +
-        '\n\n... Liste raccourcie.';
-    }
-
-    return bot.sendMessage(chatId, text);
-
-  } catch (error) {
-
-    return bot.sendMessage(
-      chatId,
-      '❌ Erreur lors de la récupération des matchs.'
-    );
-  }
+bot.command('today', async (ctx) => {
+try {
+const today = new Date().toISOString().split('T')[0];
+const matches = await getMatchesByDate(today);
+return ctx.reply(formatMatchesMessage(matches, "aujourd'hui"));
+} catch (error) {
+console.error(error.response?.data || error.message);
+return ctx.reply("Erreur lors de la récupération des matchs du jour.");
+}
 });
 
-// =====================================================
-// /DATE
-// =====================================================
+bot.command('match', async (ctx) => {
+const teamName = ctx.match?.trim();
 
-bot.onText(
-  /\/date\s+(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/i,
-  async (msg, match) => {
+if (!teamName) {
+return ctx.reply("Utilise la commande comme ça : /match Real Madrid");
+}
 
-    const chatId = msg.chat.id;
+try {
+const team = await findTeam(teamName);
+if (!team) {
+return ctx.reply(Équipe "${teamName}" introuvable (vérifie qu'elle joue dans une compétition couverte : PL, Liga, Bundesliga, Ligue 1, Serie A, C1...).);
+}
 
-    const day = match[1].padStart(2, '0');
-    const month = match[2].padStart(2, '0');
-    const year = match[3];
+const nextMatch = await getNextMatch(team.id);  
+if (!nextMatch) {  
+  return ctx.reply(`Aucun match à venir trouvé pour ${team.name}.`);  
+}  
 
-    const date = `${year}-${month}-${day}`;
+const date = new Date(nextMatch.utcDate).toLocaleString('fr-FR', { dateStyle: 'full', timeStyle: 'short' });  
 
-    try {
-
-      const matches = await getMatchesByDate(date);
-
-      if (!matches.length) {
-        return bot.sendMessage(
-          chatId,
-          `📅 Aucun match trouvé le ${day}/${month}/${year}.`
-        );
-      }
-
-      let text =
-        `📅 MATCHS DU ${day}/${month}/${year}\n\n`;
-
-      matches.slice(0, 40).forEach(m => {
-
-        text +=
-          `🏆 ${m.league.name}\n` +
-          `⚽ ${m.teams.home.name} vs ${m.teams.away.name}\n` +
-          `🕐 ${formatDate(m.fixture.date)}\n\n`;
-      });
-
-      if (text.length > 4000) {
-        text = text.substring(0, 3900) +
-          '\n\n... Liste raccourcie.';
-      }
-
-      return bot.sendMessage(chatId, text);
-
-    } catch (error) {
-
-      return bot.sendMessage(
-        chatId,
-        '❌ Erreur lors de la recherche.'
-      );
-    }
-  }
+return ctx.reply(  
+  `⚽ ${team.name}\n\nProchain match :\n${nextMatch.homeTeam.name} vs ${nextMatch.awayTeam.name}\n📅 ${date}\n🏆 ${nextMatch.competition.name}`  
 );
 
-// =====================================================
-// /ANALYSE
-// =====================================================
-
-bot.onText(
-  /\/analyse\s+(.+?)\s+vs\s+(.+)/i,
-  async (msg, match) => {
-
-    const chatId = msg.chat.id;
-
-    const nameA = match[1].trim();
-    const nameB = match[2].trim();
-
-    try {
-
-      await bot.sendMessage(
-        chatId,
-        `🔍 Analyse de ${nameA} vs ${nameB}...`
-      );
-
-      // Recherche des deux équipes
-      const [teamA, teamB] = await Promise.all([
-        findTeam(nameA),
-        findTeam(nameB)
-      ]);
-
-      if (!teamA || !teamB) {
-
-        return bot.sendMessage(
-          chatId,
-          '❌ Une des deux équipes est introuvable.'
-        );
-      }
-
-      // Récupération des données
-      const [
-        recentA,
-        recentB,
-        h2h
-      ] = await Promise.all([
-        getRecentMatches(teamA.id, 5),
-        getRecentMatches(teamB.id, 5),
-        getHeadToHead(teamA.id, teamB.id, 5)
-      ]);
-
-      const statsA =
-        calculateForm(recentA, teamA.id);
-
-      const statsB =
-        calculateForm(recentB, teamB.id);
-
-      // -------------------------------------------------
-      // ANALYSE
-      // -------------------------------------------------
-
-      const totalGoalsA =
-        statsA.goalsFor + statsA.goalsAgainst;
-
-      const totalGoalsB =
-        statsB.goalsFor + statsB.goalsAgainst;
-
-      const avgTotalA =
-        (
-          parseFloat(statsA.avgGoalsFor) +
-          parseFloat(statsA.avgGoalsAgainst)
-        ).toFixed(2);
-
-      const avgTotalB =
-        (
-          parseFloat(statsB.avgGoalsFor) +
-          parseFloat(statsB.avgGoalsAgainst)
-        ).toFixed(2);
-
-      const text =
-`📊 ANALYSE FOOTBALL
-
-⚽ ${teamA.name}
-vs
-⚽ ${teamB.name}
-
-━━━━━━━━━━━━━━━━
-
-📈 FORME RÉCENTE
-
-${teamA.name}
-${statsA.form}
-🟢 ${statsA.wins} victoires
-🟡 ${statsA.draws} nuls
-🔴 ${statsA.losses} défaites
-
-${teamB.name}
-${statsB.form}
-🟢 ${statsB.wins} victoires
-🟡 ${statsB.draws} nuls
-🔴 ${statsB.losses} défaites
-
-━━━━━━━━━━━━━━━━
-
-⚽ MOYENNES DE BUTS
-
-${teamA.name}
-➡️ ${statsA.avgGoalsFor} marqué(s)
-➡️ ${statsA.avgGoalsAgainst} encaissé(s)
-
-${teamB.name}
-➡️ ${statsB.avgGoalsFor} marqué(s)
-➡️ ${statsB.avgGoalsAgainst} encaissé(s)
-
-━━━━━━━━━━━━━━━━
-
-📊 VOLUME DE BUTS RÉCENT
-
-${teamA.name} : ${avgTotalA}
-${teamB.name} : ${avgTotalB}
-
-━━━━━━━━━━━━━━━━
-
-🤝 5 DERNIÈRES CONFRONTATIONS
-
-${formatH2H(h2h)}
-
-━━━━━━━━━━━━━━━━
-
-ℹ️ Cette analyse repose sur les données disponibles
-dans API-Football : résultats récents, buts et
-confrontations directes.
-
-Elle ne tient pas compte de tous les éléments
-pouvant influencer un match, comme les compositions
-officielles ou certains changements de dernière minute.`;
-
-      return bot.sendMessage(chatId, text);
-
-    } catch (error) {
-
-      console.error(error);
-
-      return bot.sendMessage(
-        chatId,
-        '❌ Une erreur est survenue pendant l’analyse.'
-      );
-    }
-  }
-);
-
-// =====================================================
-// MATCH DIRECT "ÉQUIPE VS ÉQUIPE"
-// =====================================================
-
-bot.onText(
-  /^(.+?)\s+vs\s+(.+)$/i,
-  async (msg, match) => {
-
-    const chatId = msg.chat.id;
-
-    const nameA = match[1].trim();
-    const nameB = match[2].trim();
-
-    // Évite de traiter les commandes /analyse
-    if (
-      nameA.toLowerCase().startsWith('/analyse')
-    ) {
-      return;
-    }
-
-    try {
-
-      const [teamA, teamB] = await Promise.all([
-        findTeam(nameA),
-        findTeam(nameB)
-      ]);
-
-      if (!teamA || !teamB) {
-
-        return bot.sendMessage(
-          chatId,
-          '❌ Je n’ai pas trouvé une des deux équipes.'
-        );
-      }
-
-      return bot.sendMessage(
-        chatId,
-        `💡 Pour lancer l'analyse complète :\n\n` +
-        `/analyse ${teamA.name} vs ${teamB.name}`
-      );
-
-    } catch (error) {
-
-      return bot.sendMessage(
-        chatId,
-        '❌ Erreur lors de la recherche des équipes.'
-      );
-    }
-  }
-);
-
-// =====================================================
-// ERREURS POLLING
-// =====================================================
-
-bot.on('polling_error', (error) => {
-  console.error('Telegram polling error:', error.message);
+} catch (error) {
+console.error(error.response?.data || error.message);
+return ctx.reply("Erreur lors de la récupération des infos.");
+}
 });
 
-// =====================================================
-// MESSAGE DE DÉMARRAGE
-// =====================================================
+// ==================== DÉTECTION DE DATE ====================
 
-console.log('✅ Bot en écoute...');
+bot.hears(/^(\d{1,2})/-/-$/, async (ctx) => {
+const [, day, month, year] = ctx.match;
+const dateStr = ${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')};
+
+const parsedDate = new Date(dateStr);
+if (isNaN(parsedDate.getTime())) {
+return ctx.reply("Date invalide. Utilise le format JJ/MM/AAAA, par exemple 20/09/2026.");
+}
+
+try {
+const matches = await getMatchesByDate(dateStr);
+const dateLabel = parsedDate.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' });
+return ctx.reply(formatMatchesMessage(matches, dateLabel));
+} catch (error) {
+console.error(error.response?.data || error.message);
+return ctx.reply("Erreur lors de la récupération des matchs pour cette date.");
+}
+});
+
+// ==================== ANALYSE "Équipe1 vs Équipe2" ====================
+
+bot.hears(/^(.+?)\s+vs\s+(.+)$/i, async (ctx) => {
+const [, nameA, nameB] = ctx.match;
+
+try {
+const teamA = await findTeam(nameA.trim());
+const teamB = await findTeam(nameB.trim());
+
+if (!teamA || !teamB) {  
+  return ctx.reply("Je n'ai pas trouvé une des deux équipes. Vérifie l'orthographe ou qu'elle joue dans une compétition couverte.");  
+}  
+
+await ctx.reply(`🔍 Analyse en cours : ${teamA.name} vs ${teamB.name}...`);  
+
+const [matchesA, matchesB, h2h] = await Promise.all([  
+  getRecentMatches(teamA.id, 5),  
+  getRecentMatches(teamB.id, 5),  
+  getHeadToHead(teamA.id, teamB.id)  
+]);  
+
+const statsA = computeStats(matchesA, teamA.id);  
+const statsB = computeStats(matchesB, teamB.id);  
+const probs = estimateProbabilities(statsA.avgFor, statsB.avgFor);  
+
+const h2hText = h2h.length  
+  ? h2h.map(m => `${new Date(m.utcDate).toLocaleDateString('fr-FR')} : ${m.homeTeam.name} ${m.score.fullTime.home}-${m.score.fullTime.away} ${m.awayTeam.name}`).join('\n')  
+  : "Aucune confrontation récente trouvée.";  
+
+const message = `📊 ${teamA.name} vs ${teamB.name}
+
+📈 Forme (5 derniers matchs)
+${teamA.name} : ${statsA.form} (${statsA.wins}V ${statsA.draws}N ${statsA.losses}D)
+${teamB.name} : ${statsB.form} (${statsB.wins}V ${statsB.draws}N ${statsB.losses}D)
+
+⚽ Buts marqués/encaissés (moyenne)
+${teamA.name} : ${statsA.avgFor} marqués / ${statsA.avgAgainst} encaissés
+${teamB.name} : ${statsB.avgFor} marqués / ${statsB.avgAgainst} encaissés
+
+🏠 Domicile / 🚗 Extérieur
+${teamA.name} (dom.) : ${statsA.homeAvgFor} marqués / ${statsA.homeAvgAgainst} encaissés
+${teamB.name} (ext.) : ${statsB.awayAvgFor} marqués / ${statsB.awayAvgAgainst} encaissés
+
+🤝 Confrontations directes récentes
+${h2hText}
+
+📌 Estimations statistiques (modèle Poisson simplifié)
+Victoire ${teamA.name} : ${probs.homeWin}%
+Match nul : ${probs.draw}%
+Victoire ${teamB.name} : ${probs.awayWin}%
+Plus de 2.5 buts : ${probs.over25}%
+BTTS (les 2 marquent) : ${probs.btts}%
+
+🧠 Conclusion
+Ces chiffres reflètent uniquement des tendances statistiques récentes (forme, buts, historique). Ils ignorent blessures, enjeux ou contexte du jour, et ne constituent pas une prédiction certaine — juste une lecture probabiliste.`;
+
+return ctx.reply(message);
+
+} catch (error) {
+console.error(error.response?.data || error.message);
+return ctx.reply("Erreur lors de l'analyse. Réessaie dans quelques instants.");
+}
+});
+
+// ==================== DÉMARRAGE ====================
+
+loadTeamsCache().then(() => {
+bot.startPolling();
+console.log('Bot en écoute.');
+});
