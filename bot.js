@@ -71,9 +71,10 @@ async function findTeam(name) {
 async function getRecentMatches(teamId, limit = 5) {
   const res = await axios.get(`${API_BASE}/fixtures`, {
     headers: API_HEADERS,
-    params: { team: teamId, last: limit, status: 'FT' },
+    params: { team: teamId, last: limit },
   });
-  return res.data.response || [];
+  const matches = res.data.response || [];
+  return matches.filter(m => m.fixture.status.short === 'FT');
 }
 
 async function getNextMatch(teamId) {
