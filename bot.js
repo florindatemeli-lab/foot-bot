@@ -69,30 +69,44 @@ async function findTeam(name) {
 
 // ==================== UTILITAIRES API ====================
 
-async function getRecentMatches(teamId, limit = 5) {
+// Le plan gratuit d'API-Football n'autorise pas les paramètres "last"/"next" :
+// on récupère donc tous les matchs de la saison pour une équipe, puis on filtre/trie nous-mêmes.
+async function getTeamSeasonFixtures(teamId) {
   const res = await axios.get(`${API_BASE}/fixtures`, {
     headers: API_HEADERS,
-    params: { team: teamId, last: limit },
+    params: { team: teamId, season: SEASON },
   });
-  console.log('DEBUG getRecentMatches teamId=' + teamId, JSON.stringify(res.data.errors), 'results=' + res.data.results);
-  const matches = res.data.response || [];
-  return matches.filter(m => m.fixture.status.short === 'FT');
+  console.log('DEBUG getTeamSeasonFixtures teamId=' + teamId, JSON.stringify(res.data.errors), 'results=' + res.data.results);
+  return res.data.response || [];
+}
+
+async function getRecentMatches(teamId, limit = 5) {
+  const fixtures = await getTeamSeasonFixtures(teamId);
+  return fixtures
+    .filter(m => m.fixture.status.short === 'FT')
+    .sort((a, b) => new Date(b.fixture.date) - new Date(a.fixture.date))
+    .slice(0, limit);
 }
 
 async function getNextMatch(teamId) {
-  const res = await axios.get(`${API_BASE}/fixtures`, {
-    headers: API_HEADERS,
-    params: { team: teamId, next: 1 },
-  });
-  return res.data.response?.[0] || null;
+  const fixtures = await getTeamSeasonFixtures(teamId);
+  const upcoming = fixtures
+    .filter(m => ['NS', 'TBD'].includes(m.fixture.status.short))
+    .sort((a, b) => new Date(a.fixture.date) - new Date(b.fixture.date));
+  return upcoming[0] || null;
 }
 
 async function getHeadToHead(teamAId, teamBId) {
   const res = await axios.get(`${API_BASE}/fixtures/headtohead`, {
     headers: API_HEADERS,
-    params: { h2h: `${teamAId}-${teamBId}`, last: 5 },
+    params: { h2h: `${teamAId}-${teamBId}` },
   });
-  return res.data.response || [];
+  console.log('DEBUG getHeadToHead ' + teamAId + '-' + teamBId, JSON.stringify(res.data.errors), 'results=' + res.data.results);
+  const matches = res.data.response || [];
+  return matches
+    .filter(m => m.fixture.status.short === 'FT')
+    .sort((a, b) => new Date(b.fixture.date) - new Date(a.fixture.date))
+    .slice(0, 5);
 }
 
 async function getLiveMatches() {
@@ -100,6 +114,7 @@ async function getLiveMatches() {
     headers: API_HEADERS,
     params: { live: 'all' },
   });
+  console.log('DEBUG getLiveMatches', JSON.stringify(res.data.errors), 'results=' + res.data.results);
   const matches = res.data.response || [];
   return matches.filter(m => LEAGUES[m.league.id]);
 }
@@ -109,6 +124,7 @@ async function getMatchesByDate(dateStr) {
     headers: API_HEADERS,
     params: { date: dateStr },
   });
+  console.log('DEBUG getMatchesByDate ' + dateStr, JSON.stringify(res.data.errors), 'results=' + res.data.results);
   const matches = res.data.response || [];
   return matches.filter(m => LEAGUES[m.league.id]);
 }
@@ -118,6 +134,7 @@ async function getStandings(leagueId) {
     headers: API_HEADERS,
     params: { league: leagueId, season: SEASON },
   });
+  console.log('DEBUG getStandings league=' + leagueId, JSON.stringify(res.data.errors), 'results=' + res.data.results);
   return res.data.response?.[0]?.league?.standings?.[0] || [];
 }
 
@@ -126,15 +143,16 @@ async function getTopScorers(leagueId) {
     headers: API_HEADERS,
     params: { league: leagueId, season: SEASON },
   });
+  console.log('DEBUG getTopScorers league=' + leagueId, JSON.stringify(res.data.errors), 'results=' + res.data.results);
   return res.data.response || [];
 }
 
 async function getUpcomingFixtures(teamId, count = 10) {
-  const res = await axios.get(`${API_BASE}/fixtures`, {
-    headers: API_HEADERS,
-    params: { team: teamId, next: count },
-  });
-  return res.data.response || [];
+  const fixtures = await getTeamSeasonFixtures(teamId);
+  return fixtures
+    .filter(m => ['NS', 'TBD'].includes(m.fixture.status.short))
+    .sort((a, b) => new Date(a.fixture.date) - new Date(b.fixture.date))
+    .slice(0, count);
 }
 
 async function getLineups(fixtureId) {
@@ -142,6 +160,7 @@ async function getLineups(fixtureId) {
     headers: API_HEADERS,
     params: { fixture: fixtureId },
   });
+  console.log('DEBUG getLineups fixture=' + fixtureId, JSON.stringify(res.data.errors), 'results=' + res.data.results);
   return res.data.response || [];
 }
 
@@ -150,6 +169,7 @@ async function getInjuries(teamId) {
     headers: API_HEADERS,
     params: { team: teamId, season: SEASON },
   });
+  console.log('DEBUG getInjuries teamId=' + teamId, JSON.stringify(res.data.errors), 'results=' + res.data.results);
   return res.data.response || [];
 }
 
@@ -163,6 +183,7 @@ async function getMatchEvents(fixtureId) {
     headers: API_HEADERS,
     params: { fixture: fixtureId },
   });
+  console.log('DEBUG getMatchEvents fixture=' + fixtureId, JSON.stringify(res.data.errors), 'results=' + res.data.results);
   return res.data.response || [];
 }
 
@@ -171,6 +192,7 @@ async function searchPlayer(name) {
     headers: API_HEADERS,
     params: { search: name, season: SEASON },
   });
+  console.log('DEBUG searchPlayer "' + name + '"', JSON.stringify(res.data.errors), 'results=' + res.data.results);
   return res.data.response || [];
 }
 
