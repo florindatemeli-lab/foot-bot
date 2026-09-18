@@ -54,6 +54,7 @@ async function findTeam(name) {
       headers: API_HEADERS,
       params: { search: name },
     });
+    console.log('DEBUG findTeam search="' + name + '"', JSON.stringify(res.data.errors), 'results=' + res.data.results, 'first=' + JSON.stringify(res.data.response?.[0]?.team));
     const found = res.data.response?.[0]?.team;
     if (found) {
       teamsCache[normalize(found.name)] = found;
@@ -73,6 +74,7 @@ async function getRecentMatches(teamId, limit = 5) {
     headers: API_HEADERS,
     params: { team: teamId, last: limit },
   });
+  console.log('DEBUG getRecentMatches teamId=' + teamId, JSON.stringify(res.data.errors), 'results=' + res.data.results);
   const matches = res.data.response || [];
   return matches.filter(m => m.fixture.status.short === 'FT');
 }
