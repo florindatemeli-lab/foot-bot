@@ -27,7 +27,8 @@ const LEAGUES = {
   40: 'Championship',
 };
 
-const SEASON = new Date().getFullYear(); // approximation simple de la saison en cours
+const SEASON = new Date().getFullYear(); // saison en cours (utilisée où la saison est optionnelle)
+const FALLBACK_SEASON = 2024; // le plan gratuit d'API-Football ne couvre que 2022-2024 pour les endpoints qui exigent une saison
 
 function findLeague(name) {
   const query = normalize(name);
@@ -69,30 +70,27 @@ async function findTeam(name) {
 
 // ==================== UTILITAIRES API ====================
 
-// Le plan gratuit d'API-Football n'autorise pas les paramètres "last"/"next" :
-// on récupère donc tous les matchs de la saison pour une équipe, puis on filtre/trie nous-mêmes.
-async function getTeamSeasonFixtures(teamId) {
+// Le plan gratuit d'API-Football n'autorise ni "last"/"next", ni la saison en cours (2026) :
+// on interroge donc par statut (terminé / à venir) sans préciser de saison.
+async function getTeamFixturesByStatus(teamId, status) {
   const res = await axios.get(`${API_BASE}/fixtures`, {
     headers: API_HEADERS,
-    params: { team: teamId, season: SEASON },
+    params: { team: teamId, status },
   });
-  console.log('DEBUG getTeamSeasonFixtures teamId=' + teamId, JSON.stringify(res.data.errors), 'results=' + res.data.results);
+  console.log('DEBUG getTeamFixturesByStatus teamId=' + teamId + ' status=' + status, JSON.stringify(res.data.errors), 'results=' + res.data.results);
   return res.data.response || [];
 }
 
 async function getRecentMatches(teamId, limit = 5) {
-  const fixtures = await getTeamSeasonFixtures(teamId);
+  const fixtures = await getTeamFixturesByStatus(teamId, 'FT');
   return fixtures
-    .filter(m => m.fixture.status.short === 'FT')
     .sort((a, b) => new Date(b.fixture.date) - new Date(a.fixture.date))
     .slice(0, limit);
 }
 
 async function getNextMatch(teamId) {
-  const fixtures = await getTeamSeasonFixtures(teamId);
-  const upcoming = fixtures
-    .filter(m => ['NS', 'TBD'].includes(m.fixture.status.short))
-    .sort((a, b) => new Date(a.fixture.date) - new Date(b.fixture.date));
+  const fixtures = await getTeamFixturesByStatus(teamId, 'NS');
+  const upcoming = fixtures.sort((a, b) => new Date(a.fixture.date) - new Date(b.fixture.date));
   return upcoming[0] || null;
 }
 
@@ -132,7 +130,7 @@ async function getMatchesByDate(dateStr) {
 async function getStandings(leagueId) {
   const res = await axios.get(`${API_BASE}/standings`, {
     headers: API_HEADERS,
-    params: { league: leagueId, season: SEASON },
+    params: { league: leagueId, season: FALLBACK_SEASON },
   });
   console.log('DEBUG getStandings league=' + leagueId, JSON.stringify(res.data.errors), 'results=' + res.data.results);
   return res.data.response?.[0]?.league?.standings?.[0] || [];
@@ -141,16 +139,15 @@ async function getStandings(leagueId) {
 async function getTopScorers(leagueId) {
   const res = await axios.get(`${API_BASE}/players/topscorers`, {
     headers: API_HEADERS,
-    params: { league: leagueId, season: SEASON },
+    params: { league: leagueId, season: FALLBACK_SEASON },
   });
   console.log('DEBUG getTopScorers league=' + leagueId, JSON.stringify(res.data.errors), 'results=' + res.data.results);
   return res.data.response || [];
 }
 
 async function getUpcomingFixtures(teamId, count = 10) {
-  const fixtures = await getTeamSeasonFixtures(teamId);
+  const fixtures = await getTeamFixturesByStatus(teamId, 'NS');
   return fixtures
-    .filter(m => ['NS', 'TBD'].includes(m.fixture.status.short))
     .sort((a, b) => new Date(a.fixture.date) - new Date(b.fixture.date))
     .slice(0, count);
 }
@@ -167,7 +164,7 @@ async function getLineups(fixtureId) {
 async function getInjuries(teamId) {
   const res = await axios.get(`${API_BASE}/injuries`, {
     headers: API_HEADERS,
-    params: { team: teamId, season: SEASON },
+    params: { team: teamId, season: FALLBACK_SEASON },
   });
   console.log('DEBUG getInjuries teamId=' + teamId, JSON.stringify(res.data.errors), 'results=' + res.data.results);
   return res.data.response || [];
@@ -190,7 +187,7 @@ async function getMatchEvents(fixtureId) {
 async function searchPlayer(name) {
   const res = await axios.get(`${API_BASE}/players`, {
     headers: API_HEADERS,
-    params: { search: name, season: SEASON },
+    params: { search: name, season: FALLBACK_SEASON },
   });
   console.log('DEBUG searchPlayer "' + name + '"', JSON.stringify(res.data.errors), 'results=' + res.data.results);
   return res.data.response || [];
@@ -478,7 +475,7 @@ bot.command('classement', async (ctx) => {
       return ctx.reply(`Aucun classement disponible pour ${league.name} actuellement.`);
     }
 
-    let text = `🏆 Classement — ${league.name}\n\n`;
+    let text = `🏆 Classement — ${league.name} (saison ${FALLBACK_SEASON}, plan gratuit)\n\n`;
     standings.forEach(s => {
       text += `${s.rank}. ${s.team.name} — ${s.points} pts (${s.all.played}J, ${s.all.win}V ${s.all.draw}N ${s.all.lose}D, diff ${s.goalsDiff})\n`;
     });
@@ -507,7 +504,7 @@ bot.command('buteurs', async (ctx) => {
       return ctx.reply(`Aucune donnée de buteurs disponible pour ${league.name}.`);
     }
 
-    let text = `⚽ Top buteurs — ${league.name}\n\n`;
+    let text = `⚽ Top buteurs — ${league.name} (saison ${FALLBACK_SEASON}, plan gratuit)\n\n`;
     scorers.slice(0, 10).forEach((p, i) => {
       const stat = p.statistics[0];
       text += `${i + 1}. ${p.player.name} (${stat.team.name}) — ${stat.goals.total} buts\n`;
@@ -596,7 +593,7 @@ bot.command('blessures', async (ctx) => {
     const injuries = await getInjuries(team.id);
     if (injuries.length === 0) return ctx.reply(`Aucune blessure/suspension signalée pour ${team.name}.`);
 
-    let text = `🩹 Blessures/suspensions — ${team.name}\n\n`;
+    let text = `🩹 Blessures/suspensions — ${team.name} (saison ${FALLBACK_SEASON}, plan gratuit)\n\n`;
     const seen = new Set();
     injuries.forEach(i => {
       const name = i.player?.name;
@@ -661,7 +658,7 @@ bot.command('joueur', async (ctx) => {
     const p = results[0];
     const stat = p.statistics[0];
 
-    const text = `👤 ${p.player.name}\n` +
+    const text = `👤 ${p.player.name} (saison ${FALLBACK_SEASON}, plan gratuit)\n` +
       `Âge : ${p.player.age} | Nationalité : ${p.player.nationality}\n` +
       `Équipe : ${stat.team.name} (${stat.league.name})\n\n` +
       `Matchs joués : ${stat.games.appearences ?? 'N/A'}\n` +
