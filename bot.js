@@ -15,7 +15,6 @@ console.log('Bot démarré...');
 
 const AF_BASE = 'https://v3.football.api-sports.io';
 const AF_HEADERS = { 'x-apisports-key': apiFootballKey };
-const AF_FALLBACK_SEASON = 2024; // le plan gratuit d'API-Football ne couvre que 2022-2024 pour les endpoints qui exigent une saison
 
 const AF_LEAGUES = {
   39: 'Premier League', 140: 'La Liga', 78: 'Bundesliga', 135: 'Serie A', 61: 'Ligue 1',
@@ -291,21 +290,9 @@ async function getLineups(fixtureId) {
   return res.data.response || [];
 }
 
-async function getInjuries(teamId) {
-  const res = await axios.get(`${AF_BASE}/injuries`, { headers: AF_HEADERS, params: { team: teamId, season: AF_FALLBACK_SEASON } });
-  console.log('DEBUG getInjuries teamId=' + teamId, JSON.stringify(res.data.errors), 'results=' + res.data.results);
-  return res.data.response || [];
-}
-
 async function getMatchEvents(fixtureId) {
   const res = await axios.get(`${AF_BASE}/fixtures/events`, { headers: AF_HEADERS, params: { fixture: fixtureId } });
   console.log('DEBUG getMatchEvents fixture=' + fixtureId, JSON.stringify(res.data.errors), 'results=' + res.data.results);
-  return res.data.response || [];
-}
-
-async function searchPlayer(name, teamId) {
-  const res = await axios.get(`${AF_BASE}/players`, { headers: AF_HEADERS, params: { search: name, team: teamId, season: AF_FALLBACK_SEASON } });
-  console.log('DEBUG searchPlayer "' + name + '" team=' + teamId, JSON.stringify(res.data.errors), 'results=' + res.data.results);
   return res.data.response || [];
 }
 
@@ -355,9 +342,7 @@ bot.command('start', (ctx) => {
     "/classement <championnat> - classement actuel\n" +
     "/buteurs <championnat> - top buteurs\n" +
     "/compo <équipe> - composition du prochain match\n" +
-    "/blessures <équipe> - blessés/suspendus\n" +
     "/resume <équipe> - résumé du dernier match\n" +
-    "/joueur <nom>, <équipe> - stats d'un joueur\n" +
     "/cotes <équipe1> vs <équipe2> - cotes des bookmakers\n" +
     "/live - scores en direct\n" +
     "/today - tous les matchs du jour\n" +
@@ -515,34 +500,6 @@ bot.command('compo', async (ctx) => {
   }
 });
 
-bot.command('blessures', async (ctx) => {
-  const teamName = ctx.message.text.replace('/blessures', '').trim();
-  if (!teamName) return ctx.reply("Utilise : /blessures Real Madrid");
-
-  try {
-    const team = await findAFTeam(teamName);
-    if (!team) return ctx.reply(`Équipe "${teamName}" introuvable.`);
-
-    const injuries = await getInjuries(team.id);
-    if (injuries.length === 0) return ctx.reply(`Aucune blessure/suspension signalée pour ${team.name}.`);
-
-    let text = `🩹 Blessures/suspensions — ${team.name} (saison ${AF_FALLBACK_SEASON}, plan gratuit)\n\n`;
-    const seen = new Set();
-    injuries.forEach(i => {
-      const name = i.player?.name;
-      if (!name || seen.has(name)) return;
-      seen.add(name);
-      const reason = i.player?.reason || i.player?.type || 'Non précisé';
-      text += `${name} — ${reason}\n`;
-    });
-
-    return ctx.reply(text);
-  } catch (error) {
-    console.error(error.response?.data || error.message);
-    return ctx.reply("Erreur lors de la récupération des blessures.");
-  }
-});
-
 bot.command('resume', async (ctx) => {
   const teamName = ctx.message.text.replace('/resume', '').trim();
   if (!teamName) return ctx.reply("Utilise : /resume Real Madrid");
@@ -573,40 +530,6 @@ bot.command('resume', async (ctx) => {
   } catch (error) {
     console.error(error.response?.data || error.message);
     return ctx.reply("Erreur lors de la récupération du résumé.");
-  }
-});
-
-bot.command('joueur', async (ctx) => {
-  const query = ctx.message.text.replace('/joueur', '').trim();
-  const parts = query.split(',');
-  if (parts.length !== 2) {
-    return ctx.reply("Utilise : /joueur Nom du joueur, Équipe (ex : /joueur Raphinha, Barcelone) — l'API exige de préciser l'équipe du joueur.");
-  }
-
-  const playerName = parts[0].trim();
-  const teamName = parts[1].trim();
-
-  try {
-    const team = await findAFTeam(teamName);
-    if (!team) return ctx.reply(`Équipe "${teamName}" introuvable.`);
-
-    const results = await searchPlayer(playerName, team.id);
-    if (results.length === 0) return ctx.reply(`Aucun joueur "${playerName}" trouvé chez ${team.name} (saison ${AF_FALLBACK_SEASON}).`);
-
-    const p = results[0];
-    const stat = p.statistics[0];
-
-    const text = `👤 ${p.player.name} (saison ${AF_FALLBACK_SEASON}, plan gratuit)\n` +
-      `Âge : ${p.player.age} | Nationalité : ${p.player.nationality}\n` +
-      `Équipe : ${stat.team.name} (${stat.league.name})\n\n` +
-      `Matchs joués : ${stat.games.appearences ?? 'N/A'}\n` +
-      `Buts : ${stat.goals.total ?? 0} | Passes déc. : ${stat.goals.assists ?? 0}\n` +
-      `Cartons jaunes : ${stat.cards.yellow ?? 0} | Cartons rouges : ${stat.cards.red ?? 0}`;
-
-    return ctx.reply(text);
-  } catch (error) {
-    console.error(error.response?.data || error.message);
-    return ctx.reply("Erreur lors de la récupération des infos joueur.");
   }
 });
 
