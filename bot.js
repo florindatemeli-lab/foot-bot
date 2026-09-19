@@ -303,9 +303,9 @@ async function getMatchEvents(fixtureId) {
   return res.data.response || [];
 }
 
-async function searchPlayer(name) {
-  const res = await axios.get(`${AF_BASE}/players`, { headers: AF_HEADERS, params: { search: name, season: AF_FALLBACK_SEASON } });
-  console.log('DEBUG searchPlayer "' + name + '"', JSON.stringify(res.data.errors), 'results=' + res.data.results);
+async function searchPlayer(name, teamId) {
+  const res = await axios.get(`${AF_BASE}/players`, { headers: AF_HEADERS, params: { search: name, team: teamId, season: AF_FALLBACK_SEASON } });
+  console.log('DEBUG searchPlayer "' + name + '" team=' + teamId, JSON.stringify(res.data.errors), 'results=' + res.data.results);
   return res.data.response || [];
 }
 
@@ -357,7 +357,7 @@ bot.command('start', (ctx) => {
     "/compo <équipe> - composition du prochain match\n" +
     "/blessures <équipe> - blessés/suspendus\n" +
     "/resume <équipe> - résumé du dernier match\n" +
-    "/joueur <nom> - stats d'un joueur\n" +
+    "/joueur <nom>, <équipe> - stats d'un joueur\n" +
     "/cotes <équipe1> vs <équipe2> - cotes des bookmakers\n" +
     "/live - scores en direct\n" +
     "/today - tous les matchs du jour\n" +
@@ -577,12 +577,21 @@ bot.command('resume', async (ctx) => {
 });
 
 bot.command('joueur', async (ctx) => {
-  const name = ctx.message.text.replace('/joueur', '').trim();
-  if (!name) return ctx.reply("Utilise : /joueur Kylian Mbappé");
+  const query = ctx.message.text.replace('/joueur', '').trim();
+  const parts = query.split(',');
+  if (parts.length !== 2) {
+    return ctx.reply("Utilise : /joueur Nom du joueur, Équipe (ex : /joueur Raphinha, Barcelone) — l'API exige de préciser l'équipe du joueur.");
+  }
+
+  const playerName = parts[0].trim();
+  const teamName = parts[1].trim();
 
   try {
-    const results = await searchPlayer(name);
-    if (results.length === 0) return ctx.reply(`Aucun joueur trouvé pour "${name}".`);
+    const team = await findAFTeam(teamName);
+    if (!team) return ctx.reply(`Équipe "${teamName}" introuvable.`);
+
+    const results = await searchPlayer(playerName, team.id);
+    if (results.length === 0) return ctx.reply(`Aucun joueur "${playerName}" trouvé chez ${team.name} (saison ${AF_FALLBACK_SEASON}).`);
 
     const p = results[0];
     const stat = p.statistics[0];
