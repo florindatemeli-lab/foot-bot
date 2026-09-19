@@ -3,194 +3,167 @@ const { Telegraf } = require('telegraf');
 const axios = require('axios');
 
 const token = process.env.TELEGRAM_TOKEN;
-const footballApiKey = process.env.FOOTBALL_API_KEY;
+const apiFootballKey = process.env.FOOTBALL_API_KEY;       // API-Football (x-apisports-key)
+const footballDataKey = process.env.FOOTBALL_DATA_API_KEY; // football-data.org (X-Auth-Token)
+const oddsApiKey = process.env.ODDSPAPI_API_KEY;           // OddsPapi (?apiKey=...)
 
 const bot = new Telegraf(token);
 
-const API_BASE = 'https://v3.football.api-sports.io';
-const API_HEADERS = { 'x-apisports-key': footballApiKey };
-
 console.log('Bot démarré...');
 
-// Ligues suivies (IDs API-Football)
-const LEAGUES = {
-  39: 'Premier League',
-  140: 'La Liga',
-  78: 'Bundesliga',
-  135: 'Serie A',
-  61: 'Ligue 1',
-  2: 'Champions League',
-  3: 'Europa League',
-  848: 'Conference League',
-  88: 'Eredivisie',
-  94: 'Primeira Liga',
-  40: 'Championship',
+// ==================== CONFIG API-FOOTBALL (live, compo, blessures, joueur) ====================
+
+const AF_BASE = 'https://v3.football.api-sports.io';
+const AF_HEADERS = { 'x-apisports-key': apiFootballKey };
+const AF_FALLBACK_SEASON = 2024; // le plan gratuit d'API-Football ne couvre que 2022-2024 pour les endpoints qui exigent une saison
+
+const AF_LEAGUES = {
+  39: 'Premier League', 140: 'La Liga', 78: 'Bundesliga', 135: 'Serie A', 61: 'Ligue 1',
+  2: 'Champions League', 3: 'Europa League', 848: 'Conference League', 88: 'Eredivisie',
+  94: 'Primeira Liga', 40: 'Championship',
 };
 
-const SEASON = new Date().getFullYear(); // saison en cours (utilisée où la saison est optionnelle)
-const FALLBACK_SEASON = 2024; // le plan gratuit d'API-Football ne couvre que 2022-2024 pour les endpoints qui exigent une saison
+// ==================== CONFIG FOOTBALL-DATA.ORG (classement, buteurs, matchs, analyse) ====================
 
-function findLeague(name) {
-  const query = normalize(name);
-  const entry = Object.entries(LEAGUES).find(([, leagueName]) => normalize(leagueName).includes(query));
-  return entry ? { id: Number(entry[0]), name: entry[1] } : null;
-}
+const FD_BASE = 'https://api.football-data.org/v4';
+const FD_HEADERS = { 'X-Auth-Token': footballDataKey };
+
+const FD_COMPETITIONS = ['PL', 'PD', 'BL1', 'SA', 'FL1', 'CL', 'DED', 'PPL', 'ELC'];
+const FD_COMP_NAMES = {
+  PL: 'Premier League', PD: 'La Liga', BL1: 'Bundesliga', SA: 'Serie A', FL1: 'Ligue 1',
+  CL: 'Champions League', DED: 'Eredivisie', PPL: 'Primeira Liga', ELC: 'Championship',
+};
+
+// ==================== CONFIG ODDSPAPI (cotes des bookmakers) ====================
+
+const ODDS_BASE = 'https://api.oddspapi.io/v4';
+const ODDS_SOCCER_SPORT_ID = 10;
 
 function normalize(str) {
   return str.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 }
 
-// ==================== CACHE ÉQUIPES (en mémoire, rempli à la demande pour économiser le quota) ====================
-
-let teamsCache = {}; // clé : nom normalisé -> objet équipe {id, name}
-
-async function findTeam(name) {
+function findCompetition(name) {
   const query = normalize(name);
+  const entry = Object.entries(FD_COMP_NAMES).find(([, n]) => normalize(n).includes(query));
+  return entry ? { code: entry[0], name: entry[1] } : null;
+}
 
-  const cached = Object.values(teamsCache).find(t => normalize(t.name).includes(query));
+// ==================== CACHE ÉQUIPES FOOTBALL-DATA.ORG (chargé au démarrage) ====================
+
+let fdTeamsCache = [];
+
+async function loadFDTeamsCache() {
+  console.log('Chargement du cache des équipes (football-data.org)...');
+  for (const comp of FD_COMPETITIONS) {
+    try {
+      const res = await axios.get(`${FD_BASE}/competitions/${comp}/teams`, { headers: FD_HEADERS });
+      fdTeamsCache.push(...res.data.teams);
+      await new Promise(r => setTimeout(r, 6500)); // respecte la limite 10 req/min
+    } catch (err) {
+      console.error(`Erreur chargement ${comp}:`, err.response?.data || err.message);
+    }
+  }
+  console.log(`Cache football-data.org chargé : ${fdTeamsCache.length} équipes.`);
+}
+
+function findTeam(name) {
+  const query = normalize(name);
+  return fdTeamsCache.find(t =>
+    normalize(t.name).includes(query) ||
+    normalize(t.shortName || '').includes(query) ||
+    normalize(t.tla || '').includes(query)
+  ) || null;
+}
+
+// ==================== CACHE ÉQUIPES API-FOOTBALL (recherche à la demande) ====================
+
+let afTeamsCache = {};
+
+async function findAFTeam(name) {
+  const query = normalize(name);
+  const cached = Object.values(afTeamsCache).find(t => normalize(t.name).includes(query));
   if (cached) return cached;
 
   try {
-    const res = await axios.get(`${API_BASE}/teams`, {
-      headers: API_HEADERS,
-      params: { search: name },
-    });
-    console.log('DEBUG findTeam search="' + name + '"', JSON.stringify(res.data.errors), 'results=' + res.data.results, 'first=' + JSON.stringify(res.data.response?.[0]?.team));
+    const res = await axios.get(`${AF_BASE}/teams`, { headers: AF_HEADERS, params: { search: name } });
+    console.log('DEBUG findAFTeam search="' + name + '"', JSON.stringify(res.data.errors), 'results=' + res.data.results);
     const found = res.data.response?.[0]?.team;
     if (found) {
-      teamsCache[normalize(found.name)] = found;
+      afTeamsCache[normalize(found.name)] = found;
       return found;
     }
     return null;
   } catch (err) {
-    console.error('Erreur recherche équipe:', err.response?.data || err.message);
+    console.error('Erreur recherche équipe AF:', err.response?.data || err.message);
     return null;
   }
 }
 
-// ==================== UTILITAIRES API ====================
-
-// Le plan gratuit d'API-Football n'autorise ni "last"/"next", ni la saison en cours (2026) :
-// on interroge donc par statut (terminé / à venir) sans préciser de saison.
-async function getTeamFixturesByStatus(teamId, status) {
-  const res = await axios.get(`${API_BASE}/fixtures`, {
-    headers: API_HEADERS,
-    params: { team: teamId, status },
-  });
-  console.log('DEBUG getTeamFixturesByStatus teamId=' + teamId + ' status=' + status, JSON.stringify(res.data.errors), 'results=' + res.data.results);
-  return res.data.response || [];
-}
+// ==================== FOOTBALL-DATA.ORG : matchs, classement, buteurs ====================
 
 async function getRecentMatches(teamId, limit = 5) {
-  const fixtures = await getTeamFixturesByStatus(teamId, 'FT');
-  return fixtures
-    .sort((a, b) => new Date(b.fixture.date) - new Date(a.fixture.date))
-    .slice(0, limit);
+  const res = await axios.get(`${FD_BASE}/teams/${teamId}/matches`, {
+    headers: FD_HEADERS,
+    params: { status: 'FINISHED', limit },
+  });
+  return res.data.matches || [];
 }
 
 async function getNextMatch(teamId) {
-  const fixtures = await getTeamFixturesByStatus(teamId, 'NS');
-  const upcoming = fixtures.sort((a, b) => new Date(a.fixture.date) - new Date(b.fixture.date));
-  return upcoming[0] || null;
+  const res = await axios.get(`${FD_BASE}/teams/${teamId}/matches`, {
+    headers: FD_HEADERS,
+    params: { status: 'SCHEDULED', limit: 1 },
+  });
+  return res.data.matches?.[0] || null;
+}
+
+async function getUpcomingFixtures(teamId, limit = 10) {
+  const res = await axios.get(`${FD_BASE}/teams/${teamId}/matches`, {
+    headers: FD_HEADERS,
+    params: { status: 'SCHEDULED', limit },
+  });
+  return res.data.matches || [];
 }
 
 async function getHeadToHead(teamAId, teamBId) {
-  const res = await axios.get(`${API_BASE}/fixtures/headtohead`, {
-    headers: API_HEADERS,
-    params: { h2h: `${teamAId}-${teamBId}` },
+  const res = await axios.get(`${FD_BASE}/teams/${teamAId}/matches`, {
+    headers: FD_HEADERS,
+    params: { status: 'FINISHED', limit: 50 },
   });
-  console.log('DEBUG getHeadToHead ' + teamAId + '-' + teamBId, JSON.stringify(res.data.errors), 'results=' + res.data.results);
-  const matches = res.data.response || [];
-  return matches
-    .filter(m => m.fixture.status.short === 'FT')
-    .sort((a, b) => new Date(b.fixture.date) - new Date(a.fixture.date))
+  return (res.data.matches || [])
+    .filter(m => m.homeTeam.id === teamBId || m.awayTeam.id === teamBId)
     .slice(0, 5);
 }
 
-async function getLiveMatches() {
-  const res = await axios.get(`${API_BASE}/fixtures`, {
-    headers: API_HEADERS,
-    params: { live: 'all' },
-  });
-  console.log('DEBUG getLiveMatches', JSON.stringify(res.data.errors), 'results=' + res.data.results);
-  const matches = res.data.response || [];
-  return matches.filter(m => LEAGUES[m.league.id]);
-}
-
 async function getMatchesByDate(dateStr) {
-  const res = await axios.get(`${API_BASE}/fixtures`, {
-    headers: API_HEADERS,
-    params: { date: dateStr },
+  let allMatches = [];
+  for (const comp of FD_COMPETITIONS) {
+    try {
+      const res = await axios.get(`${FD_BASE}/competitions/${comp}/matches`, {
+        headers: FD_HEADERS,
+        params: { dateFrom: dateStr, dateTo: dateStr },
+      });
+      allMatches.push(...(res.data.matches || []));
+    } catch (err) {
+      console.error(`Erreur récupération matchs ${comp}:`, err.response?.data || err.message);
+    }
+  }
+  return allMatches;
+}
+
+async function getStandings(compCode) {
+  const res = await axios.get(`${FD_BASE}/competitions/${compCode}/standings`, { headers: FD_HEADERS });
+  const table = res.data.standings?.find(s => s.type === 'TOTAL');
+  return table?.table || [];
+}
+
+async function getTopScorers(compCode) {
+  const res = await axios.get(`${FD_BASE}/competitions/${compCode}/scorers`, {
+    headers: FD_HEADERS,
+    params: { limit: 10 },
   });
-  console.log('DEBUG getMatchesByDate ' + dateStr, JSON.stringify(res.data.errors), 'results=' + res.data.results);
-  const matches = res.data.response || [];
-  return matches.filter(m => LEAGUES[m.league.id]);
-}
-
-async function getStandings(leagueId) {
-  const res = await axios.get(`${API_BASE}/standings`, {
-    headers: API_HEADERS,
-    params: { league: leagueId, season: FALLBACK_SEASON },
-  });
-  console.log('DEBUG getStandings league=' + leagueId, JSON.stringify(res.data.errors), 'results=' + res.data.results);
-  return res.data.response?.[0]?.league?.standings?.[0] || [];
-}
-
-async function getTopScorers(leagueId) {
-  const res = await axios.get(`${API_BASE}/players/topscorers`, {
-    headers: API_HEADERS,
-    params: { league: leagueId, season: FALLBACK_SEASON },
-  });
-  console.log('DEBUG getTopScorers league=' + leagueId, JSON.stringify(res.data.errors), 'results=' + res.data.results);
-  return res.data.response || [];
-}
-
-async function getUpcomingFixtures(teamId, count = 10) {
-  const fixtures = await getTeamFixturesByStatus(teamId, 'NS');
-  return fixtures
-    .sort((a, b) => new Date(a.fixture.date) - new Date(b.fixture.date))
-    .slice(0, count);
-}
-
-async function getLineups(fixtureId) {
-  const res = await axios.get(`${API_BASE}/fixtures/lineups`, {
-    headers: API_HEADERS,
-    params: { fixture: fixtureId },
-  });
-  console.log('DEBUG getLineups fixture=' + fixtureId, JSON.stringify(res.data.errors), 'results=' + res.data.results);
-  return res.data.response || [];
-}
-
-async function getInjuries(teamId) {
-  const res = await axios.get(`${API_BASE}/injuries`, {
-    headers: API_HEADERS,
-    params: { team: teamId, season: FALLBACK_SEASON },
-  });
-  console.log('DEBUG getInjuries teamId=' + teamId, JSON.stringify(res.data.errors), 'results=' + res.data.results);
-  return res.data.response || [];
-}
-
-async function getLastFinishedMatch(teamId) {
-  const matches = await getRecentMatches(teamId, 1);
-  return matches[0] || null;
-}
-
-async function getMatchEvents(fixtureId) {
-  const res = await axios.get(`${API_BASE}/fixtures/events`, {
-    headers: API_HEADERS,
-    params: { fixture: fixtureId },
-  });
-  console.log('DEBUG getMatchEvents fixture=' + fixtureId, JSON.stringify(res.data.errors), 'results=' + res.data.results);
-  return res.data.response || [];
-}
-
-async function searchPlayer(name) {
-  const res = await axios.get(`${API_BASE}/players`, {
-    headers: API_HEADERS,
-    params: { search: name, season: FALLBACK_SEASON },
-  });
-  console.log('DEBUG searchPlayer "' + name + '"', JSON.stringify(res.data.errors), 'results=' + res.data.results);
-  return res.data.response || [];
+  return res.data.scorers || [];
 }
 
 function formatMatchesMessage(matches, dateLabel) {
@@ -200,7 +173,7 @@ function formatMatchesMessage(matches, dateLabel) {
 
   const byCompetition = {};
   matches.forEach(m => {
-    const comp = m.league.name;
+    const comp = m.competition.name;
     if (!byCompetition[comp]) byCompetition[comp] = [];
     byCompetition[comp].push(m);
   });
@@ -209,28 +182,22 @@ function formatMatchesMessage(matches, dateLabel) {
   for (const comp in byCompetition) {
     text += `🏆 ${comp}\n`;
     byCompetition[comp].forEach(m => {
-      const time = new Date(m.fixture.date).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
-      const status = m.fixture.status.short;
-      const isLive = ['1H', '2H', 'HT', 'ET', 'P', 'LIVE'].includes(status);
-      const isFinished = status === 'FT';
-      const scoreStr = isFinished
-        ? `${m.goals.home}-${m.goals.away}`
-        : isLive
-        ? `🔴 ${m.goals.home ?? 0}-${m.goals.away ?? 0}`
+      const time = new Date(m.utcDate).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+      const status = m.status === 'FINISHED'
+        ? `${m.score.fullTime.home}-${m.score.fullTime.away}`
+        : m.status === 'IN_PLAY' || m.status === 'PAUSED'
+        ? `🔴 ${m.score.fullTime.home ?? 0}-${m.score.fullTime.away ?? 0}`
         : time;
-      text += `  ${m.teams.home.name} vs ${m.teams.away.name} — ${scoreStr}\n`;
+      text += `  ${m.homeTeam.name} vs ${m.awayTeam.name} — ${status}\n`;
     });
     text += '\n';
   }
 
-  if (text.length > 4000) {
-    text = text.slice(0, 4000) + '\n...(liste tronquée, trop de matchs)';
-  }
-
+  if (text.length > 4000) text = text.slice(0, 4000) + '\n...(liste tronquée, trop de matchs)';
   return text;
 }
 
-// ==================== CALCULS STATS ====================
+// ==================== CALCULS STATS (football-data.org) ====================
 
 function computeStats(matches, teamId) {
   let wins = 0, draws = 0, losses = 0, goalsFor = 0, goalsAgainst = 0;
@@ -239,9 +206,9 @@ function computeStats(matches, teamId) {
   let form = '';
 
   matches.forEach(m => {
-    const isHome = m.teams.home.id === teamId;
-    const gf = isHome ? m.goals.home : m.goals.away;
-    const ga = isHome ? m.goals.away : m.goals.home;
+    const isHome = m.homeTeam.id === teamId;
+    const gf = isHome ? m.score.fullTime.home : m.score.fullTime.away;
+    const ga = isHome ? m.score.fullTime.away : m.score.fullTime.home;
 
     goalsFor += gf; goalsAgainst += ga;
     if (isHome) { homeCount++; homeFor += gf; homeAgainst += ga; }
@@ -291,6 +258,84 @@ function estimateProbabilities(avgA, avgB) {
   };
 }
 
+// ==================== API-FOOTBALL : live, compo, blessures, joueur, résumé ====================
+
+async function getLiveMatches() {
+  const res = await axios.get(`${AF_BASE}/fixtures`, { headers: AF_HEADERS, params: { live: 'all' } });
+  console.log('DEBUG getLiveMatches', JSON.stringify(res.data.errors), 'results=' + res.data.results);
+  const matches = res.data.response || [];
+  return matches.filter(m => AF_LEAGUES[m.league.id]);
+}
+
+// Le plan gratuit d'API-Football n'autorise pas "last"/"next" : on filtre par statut.
+async function getAFTeamFixturesByStatus(teamId, status) {
+  const res = await axios.get(`${AF_BASE}/fixtures`, { headers: AF_HEADERS, params: { team: teamId, status } });
+  console.log('DEBUG getAFTeamFixturesByStatus teamId=' + teamId + ' status=' + status, JSON.stringify(res.data.errors), 'results=' + res.data.results);
+  return res.data.response || [];
+}
+
+async function getNextMatchAF(teamId) {
+  const fixtures = await getAFTeamFixturesByStatus(teamId, 'NS');
+  return fixtures.sort((a, b) => new Date(a.fixture.date) - new Date(b.fixture.date))[0] || null;
+}
+
+async function getLastFinishedMatchAF(teamId) {
+  const fixtures = await getAFTeamFixturesByStatus(teamId, 'FT');
+  return fixtures.sort((a, b) => new Date(b.fixture.date) - new Date(a.fixture.date))[0] || null;
+}
+
+async function getLineups(fixtureId) {
+  const res = await axios.get(`${AF_BASE}/fixtures/lineups`, { headers: AF_HEADERS, params: { fixture: fixtureId } });
+  console.log('DEBUG getLineups fixture=' + fixtureId, JSON.stringify(res.data.errors), 'results=' + res.data.results);
+  return res.data.response || [];
+}
+
+async function getInjuries(teamId) {
+  const res = await axios.get(`${AF_BASE}/injuries`, { headers: AF_HEADERS, params: { team: teamId, season: AF_FALLBACK_SEASON } });
+  console.log('DEBUG getInjuries teamId=' + teamId, JSON.stringify(res.data.errors), 'results=' + res.data.results);
+  return res.data.response || [];
+}
+
+async function getMatchEvents(fixtureId) {
+  const res = await axios.get(`${AF_BASE}/fixtures/events`, { headers: AF_HEADERS, params: { fixture: fixtureId } });
+  console.log('DEBUG getMatchEvents fixture=' + fixtureId, JSON.stringify(res.data.errors), 'results=' + res.data.results);
+  return res.data.response || [];
+}
+
+async function searchPlayer(name) {
+  const res = await axios.get(`${AF_BASE}/players`, { headers: AF_HEADERS, params: { search: name, season: AF_FALLBACK_SEASON } });
+  console.log('DEBUG searchPlayer "' + name + '"', JSON.stringify(res.data.errors), 'results=' + res.data.results);
+  return res.data.response || [];
+}
+
+// ==================== ODDSPAPI : cotes des bookmakers ====================
+
+async function findOddsFixture(nameA, nameB) {
+  const res = await axios.get(`${ODDS_BASE}/fixtures`, {
+    params: { apiKey: oddsApiKey, sportId: ODDS_SOCCER_SPORT_ID },
+  });
+  const fixtures = Array.isArray(res.data) ? res.data : (res.data.fixtures || res.data.data || []);
+  console.log('DEBUG findOddsFixture count=' + fixtures.length, 'sample=' + JSON.stringify(fixtures[0]));
+
+  const queryA = normalize(nameA);
+  const queryB = normalize(nameB);
+
+  return fixtures.find(f => {
+    const names = (f.participants || f.teams || []).map(p => normalize(p.name || ''));
+    const hasA = names.some(n => n.includes(queryA) || queryA.includes(n));
+    const hasB = names.some(n => n.includes(queryB) || queryB.includes(n));
+    return hasA && hasB;
+  }) || null;
+}
+
+async function getOddsForFixture(fixtureId) {
+  const res = await axios.get(`${ODDS_BASE}/fixtures/${fixtureId}/odds`, {
+    params: { apiKey: oddsApiKey },
+  });
+  console.log('DEBUG getOddsForFixture fixture=' + fixtureId, JSON.stringify(res.data).slice(0, 1500));
+  return res.data;
+}
+
 // ==================== COMMANDES ====================
 
 bot.command('start', (ctx) => {
@@ -305,6 +350,7 @@ bot.command('start', (ctx) => {
     "/blessures <équipe> - blessés/suspendus\n" +
     "/resume <équipe> - résumé du dernier match\n" +
     "/joueur <nom> - stats d'un joueur\n" +
+    "/cotes <équipe1> vs <équipe2> - cotes des bookmakers\n" +
     "/live - scores en direct\n" +
     "/today - tous les matchs du jour\n" +
     "/suivre <équipe> - alertes buts en direct\n" +
@@ -318,16 +364,12 @@ bot.command('start', (ctx) => {
 bot.command('live', async (ctx) => {
   try {
     const matches = await getLiveMatches();
-
-    if (matches.length === 0) {
-      return ctx.reply("Aucun match en direct actuellement.");
-    }
+    if (matches.length === 0) return ctx.reply("Aucun match en direct actuellement.");
 
     let text = "🔴 Matchs en direct :\n\n";
     matches.forEach(m => {
       text += `${m.teams.home.name} ${m.goals.home ?? 0} - ${m.goals.away ?? 0} ${m.teams.away.name}\n`;
     });
-
     return ctx.reply(text);
   } catch (error) {
     console.error(error.response?.data || error.message);
@@ -346,32 +388,231 @@ bot.command('today', async (ctx) => {
   }
 });
 
-bot.command('match', async (ctx) => {
-  const teamName = ctx.message.text.replace('/match', '').trim();
-
-  if (!teamName) {
-    return ctx.reply("Utilise la commande comme ça : /match Real Madrid");
-  }
+bot.command('classement', async (ctx) => {
+  const leagueName = ctx.message.text.replace('/classement', '').trim();
+  const comp = findCompetition(leagueName);
+  if (!comp) return ctx.reply("Championnat non reconnu. Essaie par exemple : /classement Ligue 1");
 
   try {
-    const team = await findTeam(teamName);
-    if (!team) {
-      return ctx.reply(`Équipe "${teamName}" introuvable (vérifie qu'elle joue dans une compétition couverte : PL, Liga, Bundesliga, Ligue 1, Serie A, C1...).`);
-    }
+    const standings = await getStandings(comp.code);
+    if (standings.length === 0) return ctx.reply(`Aucun classement disponible pour ${comp.name} actuellement.`);
+
+    let text = `🏆 Classement — ${comp.name}\n\n`;
+    standings.forEach(s => {
+      text += `${s.position}. ${s.team.name} — ${s.points} pts (${s.playedGames}J, ${s.won}V ${s.draw}N ${s.lost}D, diff ${s.goalDifference})\n`;
+    });
+
+    if (text.length > 4000) text = text.slice(0, 4000) + '\n...(tronqué)';
+    return ctx.reply(text);
+  } catch (error) {
+    console.error(error.response?.data || error.message);
+    return ctx.reply("Erreur lors de la récupération du classement.");
+  }
+});
+
+bot.command('buteurs', async (ctx) => {
+  const leagueName = ctx.message.text.replace('/buteurs', '').trim();
+  const comp = findCompetition(leagueName);
+  if (!comp) return ctx.reply("Championnat non reconnu. Essaie par exemple : /buteurs Premier League");
+
+  try {
+    const scorers = await getTopScorers(comp.code);
+    if (scorers.length === 0) return ctx.reply(`Aucune donnée de buteurs disponible pour ${comp.name}.`);
+
+    let text = `⚽ Top buteurs — ${comp.name}\n\n`;
+    scorers.forEach((s, i) => {
+      text += `${i + 1}. ${s.player.name} (${s.team.name}) — ${s.goals} buts\n`;
+    });
+
+    return ctx.reply(text);
+  } catch (error) {
+    console.error(error.response?.data || error.message);
+    return ctx.reply("Erreur lors de la récupération des buteurs.");
+  }
+});
+
+bot.command('match', async (ctx) => {
+  const teamName = ctx.message.text.replace('/match', '').trim();
+  if (!teamName) return ctx.reply("Utilise la commande comme ça : /match Real Madrid");
+
+  try {
+    const team = findTeam(teamName);
+    if (!team) return ctx.reply(`Équipe "${teamName}" introuvable (vérifie qu'elle joue dans une compétition couverte : PL, Liga, Bundesliga, Ligue 1, Serie A, C1...).`);
 
     const nextMatch = await getNextMatch(team.id);
-    if (!nextMatch) {
-      return ctx.reply(`Aucun match à venir trouvé pour ${team.name}.`);
-    }
+    if (!nextMatch) return ctx.reply(`Aucun match à venir trouvé pour ${team.name}.`);
 
-    const date = new Date(nextMatch.fixture.date).toLocaleString('fr-FR', { dateStyle: 'full', timeStyle: 'short' });
-
-    return ctx.reply(
-      `⚽ ${team.name}\n\nProchain match :\n${nextMatch.teams.home.name} vs ${nextMatch.teams.away.name}\n📅 ${date}\n🏆 ${nextMatch.league.name}`
-    );
+    const date = new Date(nextMatch.utcDate).toLocaleString('fr-FR', { dateStyle: 'full', timeStyle: 'short' });
+    return ctx.reply(`⚽ ${team.name}\n\nProchain match :\n${nextMatch.homeTeam.name} vs ${nextMatch.awayTeam.name}\n📅 ${date}\n🏆 ${nextMatch.competition.name}`);
   } catch (error) {
     console.error(error.response?.data || error.message);
     return ctx.reply("Erreur lors de la récupération des infos.");
+  }
+});
+
+bot.command('calendrier', async (ctx) => {
+  const teamName = ctx.message.text.replace('/calendrier', '').trim();
+  if (!teamName) return ctx.reply("Utilise : /calendrier Real Madrid");
+
+  try {
+    const team = findTeam(teamName);
+    if (!team) return ctx.reply(`Équipe "${teamName}" introuvable.`);
+
+    const fixtures = await getUpcomingFixtures(team.id, 10);
+    if (fixtures.length === 0) return ctx.reply(`Aucun match à venir trouvé pour ${team.name}.`);
+
+    let text = `📅 Calendrier — ${team.name}\n\n`;
+    fixtures.forEach(f => {
+      const date = new Date(f.utcDate).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' });
+      const opponent = f.homeTeam.id === team.id ? f.awayTeam.name : f.homeTeam.name;
+      const venue = f.homeTeam.id === team.id ? '🏠' : '🚗';
+      text += `${date} ${venue} vs ${opponent} (${f.competition.name})\n`;
+    });
+
+    return ctx.reply(text);
+  } catch (error) {
+    console.error(error.response?.data || error.message);
+    return ctx.reply("Erreur lors de la récupération du calendrier.");
+  }
+});
+
+bot.command('compo', async (ctx) => {
+  const teamName = ctx.message.text.replace('/compo', '').trim();
+  if (!teamName) return ctx.reply("Utilise : /compo Real Madrid");
+
+  try {
+    const team = await findAFTeam(teamName);
+    if (!team) return ctx.reply(`Équipe "${teamName}" introuvable.`);
+
+    const nextMatch = await getNextMatchAF(team.id);
+    if (!nextMatch) return ctx.reply(`Aucun match à venir trouvé pour ${team.name}.`);
+
+    const lineups = await getLineups(nextMatch.fixture.id);
+    if (lineups.length === 0) {
+      return ctx.reply("Composition pas encore disponible (généralement publiée ~1h avant le coup d'envoi).");
+    }
+
+    let text = `📋 Compositions — ${nextMatch.teams.home.name} vs ${nextMatch.teams.away.name}\n\n`;
+    lineups.forEach(l => {
+      text += `${l.team.name} (${l.formation}) — Coach : ${l.coach.name}\n`;
+      l.startXI.forEach(p => { text += `  ${p.player.number}. ${p.player.name} (${p.player.pos})\n`; });
+      text += '\n';
+    });
+
+    if (text.length > 4000) text = text.slice(0, 4000) + '\n...(tronqué)';
+    return ctx.reply(text);
+  } catch (error) {
+    console.error(error.response?.data || error.message);
+    return ctx.reply("Erreur lors de la récupération de la composition.");
+  }
+});
+
+bot.command('blessures', async (ctx) => {
+  const teamName = ctx.message.text.replace('/blessures', '').trim();
+  if (!teamName) return ctx.reply("Utilise : /blessures Real Madrid");
+
+  try {
+    const team = await findAFTeam(teamName);
+    if (!team) return ctx.reply(`Équipe "${teamName}" introuvable.`);
+
+    const injuries = await getInjuries(team.id);
+    if (injuries.length === 0) return ctx.reply(`Aucune blessure/suspension signalée pour ${team.name}.`);
+
+    let text = `🩹 Blessures/suspensions — ${team.name} (saison ${AF_FALLBACK_SEASON}, plan gratuit)\n\n`;
+    const seen = new Set();
+    injuries.forEach(i => {
+      const name = i.player?.name;
+      if (!name || seen.has(name)) return;
+      seen.add(name);
+      const reason = i.player?.reason || i.player?.type || 'Non précisé';
+      text += `${name} — ${reason}\n`;
+    });
+
+    return ctx.reply(text);
+  } catch (error) {
+    console.error(error.response?.data || error.message);
+    return ctx.reply("Erreur lors de la récupération des blessures.");
+  }
+});
+
+bot.command('resume', async (ctx) => {
+  const teamName = ctx.message.text.replace('/resume', '').trim();
+  if (!teamName) return ctx.reply("Utilise : /resume Real Madrid");
+
+  try {
+    const team = await findAFTeam(teamName);
+    if (!team) return ctx.reply(`Équipe "${teamName}" introuvable.`);
+
+    const lastMatch = await getLastFinishedMatchAF(team.id);
+    if (!lastMatch) return ctx.reply(`Aucun match terminé trouvé pour ${team.name}.`);
+
+    const events = await getMatchEvents(lastMatch.fixture.id);
+    const date = new Date(lastMatch.fixture.date).toLocaleDateString('fr-FR');
+
+    let text = `📝 Résumé — ${lastMatch.teams.home.name} ${lastMatch.goals.home}-${lastMatch.goals.away} ${lastMatch.teams.away.name} (${date})\n\n`;
+
+    const relevant = events.filter(e => ['Goal', 'Card'].includes(e.type));
+    if (relevant.length === 0) {
+      text += "Aucun événement détaillé disponible.";
+    } else {
+      relevant.forEach(e => {
+        const icon = e.type === 'Goal' ? '⚽' : e.detail.includes('Red') ? '🟥' : '🟨';
+        text += `${e.time.elapsed}' ${icon} ${e.player.name} (${e.team.name})${e.assist?.name ? ` — passe : ${e.assist.name}` : ''}\n`;
+      });
+    }
+
+    return ctx.reply(text);
+  } catch (error) {
+    console.error(error.response?.data || error.message);
+    return ctx.reply("Erreur lors de la récupération du résumé.");
+  }
+});
+
+bot.command('joueur', async (ctx) => {
+  const name = ctx.message.text.replace('/joueur', '').trim();
+  if (!name) return ctx.reply("Utilise : /joueur Kylian Mbappé");
+
+  try {
+    const results = await searchPlayer(name);
+    if (results.length === 0) return ctx.reply(`Aucun joueur trouvé pour "${name}".`);
+
+    const p = results[0];
+    const stat = p.statistics[0];
+
+    const text = `👤 ${p.player.name} (saison ${AF_FALLBACK_SEASON}, plan gratuit)\n` +
+      `Âge : ${p.player.age} | Nationalité : ${p.player.nationality}\n` +
+      `Équipe : ${stat.team.name} (${stat.league.name})\n\n` +
+      `Matchs joués : ${stat.games.appearences ?? 'N/A'}\n` +
+      `Buts : ${stat.goals.total ?? 0} | Passes déc. : ${stat.goals.assists ?? 0}\n` +
+      `Cartons jaunes : ${stat.cards.yellow ?? 0} | Cartons rouges : ${stat.cards.red ?? 0}`;
+
+    return ctx.reply(text);
+  } catch (error) {
+    console.error(error.response?.data || error.message);
+    return ctx.reply("Erreur lors de la récupération des infos joueur.");
+  }
+});
+
+bot.command('cotes', async (ctx) => {
+  const query = ctx.message.text.replace('/cotes', '').trim();
+  const parts = query.split(/\s+vs\s+/i);
+  if (parts.length !== 2) return ctx.reply("Utilise : /cotes Real Madrid vs Barcelone");
+
+  try {
+    const fixture = await findOddsFixture(parts[0].trim(), parts[1].trim());
+    if (!fixture) return ctx.reply("Match introuvable dans les prochaines rencontres suivies par OddsPapi.");
+
+    const odds = await getOddsForFixture(fixture.id);
+
+    // Format encore générique tant qu'on n'a pas confirmé la structure exacte de la réponse —
+    // renvoie les données brutes (tronquées) pour ajuster l'affichage si besoin.
+    let text = `💰 Cotes — ${parts[0].trim()} vs ${parts[1].trim()}\n\n`;
+    text += JSON.stringify(odds).slice(0, 1200);
+
+    return ctx.reply(text);
+  } catch (error) {
+    console.error(error.response?.data || error.message);
+    return ctx.reply("Erreur lors de la récupération des cotes.");
   }
 });
 
@@ -402,8 +643,8 @@ bot.hears(/^(.+?)\s+vs\s+(.+)$/i, async (ctx) => {
   const [, nameA, nameB] = ctx.match;
 
   try {
-    const teamA = await findTeam(nameA.trim());
-    const teamB = await findTeam(nameB.trim());
+    const teamA = findTeam(nameA.trim());
+    const teamB = findTeam(nameB.trim());
 
     if (!teamA || !teamB) {
       return ctx.reply("Je n'ai pas trouvé une des deux équipes. Vérifie l'orthographe ou qu'elle joue dans une compétition couverte.");
@@ -414,7 +655,7 @@ bot.hears(/^(.+?)\s+vs\s+(.+)$/i, async (ctx) => {
     const [matchesA, matchesB, h2h] = await Promise.all([
       getRecentMatches(teamA.id, 5),
       getRecentMatches(teamB.id, 5),
-      getHeadToHead(teamA.id, teamB.id)
+      getHeadToHead(teamA.id, teamB.id),
     ]);
 
     const statsA = computeStats(matchesA, teamA.id);
@@ -422,7 +663,7 @@ bot.hears(/^(.+?)\s+vs\s+(.+)$/i, async (ctx) => {
     const probs = estimateProbabilities(statsA.avgFor, statsB.avgFor);
 
     const h2hText = h2h.length
-      ? h2h.map(m => `${new Date(m.fixture.date).toLocaleDateString('fr-FR')} : ${m.teams.home.name} ${m.goals.home}-${m.goals.away} ${m.teams.away.name}`).join('\n')
+      ? h2h.map(m => `${new Date(m.utcDate).toLocaleDateString('fr-FR')} : ${m.homeTeam.name} ${m.score.fullTime.home}-${m.score.fullTime.away} ${m.awayTeam.name}`).join('\n')
       : "Aucune confrontation récente trouvée.";
 
     const message = `📊 ${teamA.name} vs ${teamB.name}
@@ -459,223 +700,10 @@ Ces chiffres reflètent uniquement des tendances statistiques récentes (forme, 
   }
 });
 
-// ==================== CLASSEMENT ====================
+// ==================== ABONNEMENT AUX BUTS EN DIRECT (API-Football) ====================
+// ⚠️ Consomme du quota API-Football (surveillance périodique) : reste raisonnable sur le nombre d'équipes suivies.
 
-bot.command('classement', async (ctx) => {
-  const leagueName = ctx.message.text.replace('/classement', '').trim();
-  const league = findLeague(leagueName);
-
-  if (!league) {
-    return ctx.reply("Championnat non reconnu. Essaie par exemple : /classement Ligue 1");
-  }
-
-  try {
-    const standings = await getStandings(league.id);
-    if (standings.length === 0) {
-      return ctx.reply(`Aucun classement disponible pour ${league.name} actuellement.`);
-    }
-
-    let text = `🏆 Classement — ${league.name} (saison ${FALLBACK_SEASON}, plan gratuit)\n\n`;
-    standings.forEach(s => {
-      text += `${s.rank}. ${s.team.name} — ${s.points} pts (${s.all.played}J, ${s.all.win}V ${s.all.draw}N ${s.all.lose}D, diff ${s.goalsDiff})\n`;
-    });
-
-    if (text.length > 4000) text = text.slice(0, 4000) + '\n...(tronqué)';
-    return ctx.reply(text);
-  } catch (error) {
-    console.error(error.response?.data || error.message);
-    return ctx.reply("Erreur lors de la récupération du classement.");
-  }
-});
-
-// ==================== TOP BUTEURS ====================
-
-bot.command('buteurs', async (ctx) => {
-  const leagueName = ctx.message.text.replace('/buteurs', '').trim();
-  const league = findLeague(leagueName);
-
-  if (!league) {
-    return ctx.reply("Championnat non reconnu. Essaie par exemple : /buteurs Premier League");
-  }
-
-  try {
-    const scorers = await getTopScorers(league.id);
-    if (scorers.length === 0) {
-      return ctx.reply(`Aucune donnée de buteurs disponible pour ${league.name}.`);
-    }
-
-    let text = `⚽ Top buteurs — ${league.name} (saison ${FALLBACK_SEASON}, plan gratuit)\n\n`;
-    scorers.slice(0, 10).forEach((p, i) => {
-      const stat = p.statistics[0];
-      text += `${i + 1}. ${p.player.name} (${stat.team.name}) — ${stat.goals.total} buts\n`;
-    });
-
-    return ctx.reply(text);
-  } catch (error) {
-    console.error(error.response?.data || error.message);
-    return ctx.reply("Erreur lors de la récupération des buteurs.");
-  }
-});
-
-// ==================== CALENDRIER COMPLET D'UNE ÉQUIPE ====================
-
-bot.command('calendrier', async (ctx) => {
-  const teamName = ctx.message.text.replace('/calendrier', '').trim();
-  if (!teamName) return ctx.reply("Utilise : /calendrier Real Madrid");
-
-  try {
-    const team = await findTeam(teamName);
-    if (!team) return ctx.reply(`Équipe "${teamName}" introuvable.`);
-
-    const fixtures = await getUpcomingFixtures(team.id, 10);
-    if (fixtures.length === 0) return ctx.reply(`Aucun match à venir trouvé pour ${team.name}.`);
-
-    let text = `📅 Calendrier — ${team.name}\n\n`;
-    fixtures.forEach(f => {
-      const date = new Date(f.fixture.date).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' });
-      const opponent = f.teams.home.id === team.id ? f.teams.away.name : f.teams.home.name;
-      const venue = f.teams.home.id === team.id ? '🏠' : '🚗';
-      text += `${date} ${venue} vs ${opponent} (${f.league.name})\n`;
-    });
-
-    return ctx.reply(text);
-  } catch (error) {
-    console.error(error.response?.data || error.message);
-    return ctx.reply("Erreur lors de la récupération du calendrier.");
-  }
-});
-
-// ==================== COMPOSITION D'ÉQUIPE ====================
-
-bot.command('compo', async (ctx) => {
-  const teamName = ctx.message.text.replace('/compo', '').trim();
-  if (!teamName) return ctx.reply("Utilise : /compo Real Madrid");
-
-  try {
-    const team = await findTeam(teamName);
-    if (!team) return ctx.reply(`Équipe "${teamName}" introuvable.`);
-
-    const nextMatch = await getNextMatch(team.id);
-    if (!nextMatch) return ctx.reply(`Aucun match à venir trouvé pour ${team.name}.`);
-
-    const lineups = await getLineups(nextMatch.fixture.id);
-    if (lineups.length === 0) {
-      return ctx.reply("Composition pas encore disponible (généralement publiée ~1h avant le coup d'envoi).");
-    }
-
-    let text = `📋 Compositions — ${nextMatch.teams.home.name} vs ${nextMatch.teams.away.name}\n\n`;
-    lineups.forEach(l => {
-      text += `${l.team.name} (${l.formation}) — Coach : ${l.coach.name}\n`;
-      l.startXI.forEach(p => {
-        text += `  ${p.player.number}. ${p.player.name} (${p.player.pos})\n`;
-      });
-      text += '\n';
-    });
-
-    if (text.length > 4000) text = text.slice(0, 4000) + '\n...(tronqué)';
-    return ctx.reply(text);
-  } catch (error) {
-    console.error(error.response?.data || error.message);
-    return ctx.reply("Erreur lors de la récupération de la composition.");
-  }
-});
-
-// ==================== BLESSURES / SUSPENSIONS ====================
-
-bot.command('blessures', async (ctx) => {
-  const teamName = ctx.message.text.replace('/blessures', '').trim();
-  if (!teamName) return ctx.reply("Utilise : /blessures Real Madrid");
-
-  try {
-    const team = await findTeam(teamName);
-    if (!team) return ctx.reply(`Équipe "${teamName}" introuvable.`);
-
-    const injuries = await getInjuries(team.id);
-    if (injuries.length === 0) return ctx.reply(`Aucune blessure/suspension signalée pour ${team.name}.`);
-
-    let text = `🩹 Blessures/suspensions — ${team.name} (saison ${FALLBACK_SEASON}, plan gratuit)\n\n`;
-    const seen = new Set();
-    injuries.forEach(i => {
-      const name = i.player?.name;
-      if (!name || seen.has(name)) return;
-      seen.add(name);
-      const reason = i.player?.reason || i.player?.type || 'Non précisé';
-      text += `${name} — ${reason}\n`;
-    });
-
-    return ctx.reply(text);
-  } catch (error) {
-    console.error(error.response?.data || error.message);
-    return ctx.reply("Erreur lors de la récupération des blessures.");
-  }
-});
-
-// ==================== RÉSUMÉ DU DERNIER MATCH ====================
-
-bot.command('resume', async (ctx) => {
-  const teamName = ctx.message.text.replace('/resume', '').trim();
-  if (!teamName) return ctx.reply("Utilise : /resume Real Madrid");
-
-  try {
-    const team = await findTeam(teamName);
-    if (!team) return ctx.reply(`Équipe "${teamName}" introuvable.`);
-
-    const lastMatch = await getLastFinishedMatch(team.id);
-    if (!lastMatch) return ctx.reply(`Aucun match terminé trouvé pour ${team.name}.`);
-
-    const events = await getMatchEvents(lastMatch.fixture.id);
-    const date = new Date(lastMatch.fixture.date).toLocaleDateString('fr-FR');
-
-    let text = `📝 Résumé — ${lastMatch.teams.home.name} ${lastMatch.goals.home}-${lastMatch.goals.away} ${lastMatch.teams.away.name} (${date})\n\n`;
-
-    const relevant = events.filter(e => ['Goal', 'Card'].includes(e.type));
-    if (relevant.length === 0) {
-      text += "Aucun événement détaillé disponible.";
-    } else {
-      relevant.forEach(e => {
-        const icon = e.type === 'Goal' ? '⚽' : e.detail.includes('Red') ? '🟥' : '🟨';
-        text += `${e.time.elapsed}' ${icon} ${e.player.name} (${e.team.name})${e.assist?.name ? ` — passe : ${e.assist.name}` : ''}\n`;
-      });
-    }
-
-    return ctx.reply(text);
-  } catch (error) {
-    console.error(error.response?.data || error.message);
-    return ctx.reply("Erreur lors de la récupération du résumé.");
-  }
-});
-
-// ==================== STATS D'UN JOUEUR ====================
-
-bot.command('joueur', async (ctx) => {
-  const name = ctx.message.text.replace('/joueur', '').trim();
-  if (!name) return ctx.reply("Utilise : /joueur Kylian Mbappé");
-
-  try {
-    const results = await searchPlayer(name);
-    if (results.length === 0) return ctx.reply(`Aucun joueur trouvé pour "${name}".`);
-
-    const p = results[0];
-    const stat = p.statistics[0];
-
-    const text = `👤 ${p.player.name} (saison ${FALLBACK_SEASON}, plan gratuit)\n` +
-      `Âge : ${p.player.age} | Nationalité : ${p.player.nationality}\n` +
-      `Équipe : ${stat.team.name} (${stat.league.name})\n\n` +
-      `Matchs joués : ${stat.games.appearences ?? 'N/A'}\n` +
-      `Buts : ${stat.goals.total ?? 0} | Passes déc. : ${stat.goals.assists ?? 0}\n` +
-      `Cartons jaunes : ${stat.cards.yellow ?? 0} | Cartons rouges : ${stat.cards.red ?? 0}`;
-
-    return ctx.reply(text);
-  } catch (error) {
-    console.error(error.response?.data || error.message);
-    return ctx.reply("Erreur lors de la récupération des infos joueur.");
-  }
-});
-
-// ==================== ABONNEMENT AUX BUTS EN DIRECT ====================
-// ⚠️ Consomme beaucoup de quota (surveillance périodique) : reste raisonnable sur le nombre d'équipes suivies.
-
-const subscriptions = {}; // teamId -> Set(chatId)
+const subscriptions = {}; // teamId (API-Football) -> Set(chatId)
 const lastKnownState = {}; // fixtureId -> { home, away, status }
 const POLL_INTERVAL_MINUTES = 30;
 
@@ -684,7 +712,7 @@ bot.command('suivre', async (ctx) => {
   if (!teamName) return ctx.reply("Utilise : /suivre Real Madrid");
 
   try {
-    const team = await findTeam(teamName);
+    const team = await findAFTeam(teamName);
     if (!team) return ctx.reply(`Équipe "${teamName}" introuvable.`);
 
     if (!subscriptions[team.id]) subscriptions[team.id] = new Set();
@@ -702,7 +730,7 @@ bot.command('arreter', async (ctx) => {
   if (!teamName) return ctx.reply("Utilise : /arreter Real Madrid");
 
   try {
-    const team = await findTeam(teamName);
+    const team = await findAFTeam(teamName);
     if (!team || !subscriptions[team.id]) return ctx.reply("Tu n'étais pas abonné à cette équipe.");
 
     subscriptions[team.id].delete(ctx.chat.id);
@@ -747,8 +775,10 @@ setInterval(pollSubscribedMatches, POLL_INTERVAL_MINUTES * 60 * 1000);
 
 // ==================== DÉMARRAGE ====================
 
-bot.launch();
-console.log('Bot en écoute.');
+loadFDTeamsCache().then(() => {
+  bot.launch();
+  console.log('Bot en écoute.');
+});
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
