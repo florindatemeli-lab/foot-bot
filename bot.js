@@ -267,21 +267,24 @@ async function getLiveMatches() {
   return matches.filter(m => AF_LEAGUES[m.league.id]);
 }
 
-// Le plan gratuit d'API-Football n'autorise pas "last"/"next" : on filtre par statut.
-async function getAFTeamFixturesByStatus(teamId, status) {
-  const res = await axios.get(`${AF_BASE}/fixtures`, { headers: AF_HEADERS, params: { team: teamId, status } });
-  console.log('DEBUG getAFTeamFixturesByStatus teamId=' + teamId + ' status=' + status, JSON.stringify(res.data.errors), 'results=' + res.data.results);
-  return res.data.response || [];
-}
+// Le plan gratuit d'API-Football exige désormais une saison pour team+status, et bloque la saison 2026.
+// On contourne en cherchant le match précis par DATE (dérivée de football-data.org), ce qui évite le problème de saison.
+async function findAFFixtureByDateAndTeams(dateStr, teamNameA, teamNameB) {
+  const res = await axios.get(`${AF_BASE}/fixtures`, { headers: AF_HEADERS, params: { date: dateStr } });
+  console.log('DEBUG findAFFixtureByDateAndTeams date=' + dateStr, JSON.stringify(res.data.errors), 'results=' + res.data.results);
+  const fixtures = res.data.response || [];
 
-async function getNextMatchAF(teamId) {
-  const fixtures = await getAFTeamFixturesByStatus(teamId, 'NS');
-  return fixtures.sort((a, b) => new Date(a.fixture.date) - new Date(b.fixture.date))[0] || null;
-}
+  const qA = normalize(teamNameA);
+  const qB = normalize(teamNameB);
+  const teamMatches = (n, q) => {
+    const nn = normalize(n || '');
+    return nn.includes(q) || q.includes(nn);
+  };
 
-async function getLastFinishedMatchAF(teamId) {
-  const fixtures = await getAFTeamFixturesByStatus(teamId, 'FT');
-  return fixtures.sort((a, b) => new Date(b.fixture.date) - new Date(a.fixture.date))[0] || null;
+  return fixtures.find(f =>
+    (teamMatches(f.teams.home.name, qA) && teamMatches(f.teams.away.name, qB)) ||
+    (teamMatches(f.teams.home.name, qB) && teamMatches(f.teams.away.name, qA))
+  ) || null;
 }
 
 async function getLineups(fixtureId) {
@@ -323,12 +326,12 @@ async function findOddsFixture(nameA, nameB) {
   ) || null;
 }
 
-async function getOddsForFixture(fixtureId) {
-  const res = await axios.get(`${ODDS_BASE}/fixtures/${fixtureId}/odds`, {
-    params: { apiKey: oddsApiKey },
+async function getOddsForTournament(tournamentId, bookmaker = 'pinnacle') {
+  const res = await axios.get(`${ODDS_BASE}/odds-by-tournaments`, {
+    params: { apiKey: oddsApiKey, tournamentIds: tournamentId, bookmaker },
   });
-  console.log('DEBUG getOddsForFixture fixture=' + fixtureId, JSON.stringify(res.data).slice(0, 1500));
-  return res.data;
+  console.log('DEBUG getOddsForTournament tournamentId=' + tournamentId, JSON.stringify(res.data).slice(0, 1500));
+  return Array.isArray(res.data) ? res.data : (res.data.fixtures || res.data.data || []);
 }
 
 // ==================== COMMANDES ====================
@@ -474,18 +477,22 @@ bot.command('compo', async (ctx) => {
   if (!teamName) return ctx.reply("Utilise : /compo Real Madrid");
 
   try {
-    const team = await findAFTeam(teamName);
+    const team = findTeam(teamName);
     if (!team) return ctx.reply(`Équipe "${teamName}" introuvable.`);
 
-    const nextMatch = await getNextMatchAF(team.id);
+    const nextMatch = await getNextMatch(team.id);
     if (!nextMatch) return ctx.reply(`Aucun match à venir trouvé pour ${team.name}.`);
 
-    const lineups = await getLineups(nextMatch.fixture.id);
+    const dateStr = nextMatch.utcDate.split('T')[0];
+    const afFixture = await findAFFixtureByDateAndTeams(dateStr, nextMatch.homeTeam.name, nextMatch.awayTeam.name);
+    if (!afFixture) return ctx.reply("Match trouvé mais introuvable côté API-Football pour récupérer la composition.");
+
+    const lineups = await getLineups(afFixture.fixture.id);
     if (lineups.length === 0) {
       return ctx.reply("Composition pas encore disponible (généralement publiée ~1h avant le coup d'envoi).");
     }
 
-    let text = `📋 Compositions — ${nextMatch.teams.home.name} vs ${nextMatch.teams.away.name}\n\n`;
+    let text = `📋 Compositions — ${nextMatch.homeTeam.name} vs ${nextMatch.awayTeam.name}\n\n`;
     lineups.forEach(l => {
       text += `${l.team.name} (${l.formation}) — Coach : ${l.coach.name}\n`;
       l.startXI.forEach(p => { text += `  ${p.player.number}. ${p.player.name} (${p.player.pos})\n`; });
@@ -505,17 +512,25 @@ bot.command('resume', async (ctx) => {
   if (!teamName) return ctx.reply("Utilise : /resume Real Madrid");
 
   try {
-    const team = await findAFTeam(teamName);
+    const team = findTeam(teamName);
     if (!team) return ctx.reply(`Équipe "${teamName}" introuvable.`);
 
-    const lastMatch = await getLastFinishedMatchAF(team.id);
+    const lastMatches = await getRecentMatches(team.id, 1);
+    const lastMatch = lastMatches[0];
     if (!lastMatch) return ctx.reply(`Aucun match terminé trouvé pour ${team.name}.`);
 
-    const events = await getMatchEvents(lastMatch.fixture.id);
-    const date = new Date(lastMatch.fixture.date).toLocaleDateString('fr-FR');
+    const dateStr = lastMatch.utcDate.split('T')[0];
+    const afFixture = await findAFFixtureByDateAndTeams(dateStr, lastMatch.homeTeam.name, lastMatch.awayTeam.name);
 
-    let text = `📝 Résumé — ${lastMatch.teams.home.name} ${lastMatch.goals.home}-${lastMatch.goals.away} ${lastMatch.teams.away.name} (${date})\n\n`;
+    const date = new Date(lastMatch.utcDate).toLocaleDateString('fr-FR');
+    let text = `📝 Résumé — ${lastMatch.homeTeam.name} ${lastMatch.score.fullTime.home}-${lastMatch.score.fullTime.away} ${lastMatch.awayTeam.name} (${date})\n\n`;
 
+    if (!afFixture) {
+      text += "Détails (buteurs, cartons) indisponibles pour ce match.";
+      return ctx.reply(text);
+    }
+
+    const events = await getMatchEvents(afFixture.fixture.id);
     const relevant = events.filter(e => ['Goal', 'Card'].includes(e.type));
     if (relevant.length === 0) {
       text += "Aucun événement détaillé disponible.";
@@ -546,12 +561,14 @@ bot.command('cotes', async (ctx) => {
       return ctx.reply(`Match trouvé (${fixture.participant1Name} vs ${fixture.participant2Name}, ${fixture.tournamentName}) mais les cotes ne sont pas encore publiées pour ce match.`);
     }
 
-    const odds = await getOddsForFixture(fixture.fixtureId);
+    const odds = await getOddsForTournament(fixture.tournamentId);
+    const match = odds.find(f => f.fixtureId === fixture.fixtureId);
+    if (!match) return ctx.reply("Cotes non trouvées pour ce match précis (réessaie plus près du coup d'envoi).");
 
     // Format encore générique tant qu'on n'a pas confirmé la structure exacte de la réponse —
     // renvoie les données brutes (tronquées) pour ajuster l'affichage si besoin.
     let text = `💰 Cotes — ${fixture.participant1Name} vs ${fixture.participant2Name} (${fixture.tournamentName})\n\n`;
-    text += JSON.stringify(odds).slice(0, 1200);
+    text += JSON.stringify(match.bookmakerOdds).slice(0, 1200);
 
     return ctx.reply(text);
   } catch (error) {
