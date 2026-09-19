@@ -321,17 +321,19 @@ async function findOddsFixture(nameA, nameB) {
     params: { apiKey: oddsApiKey, sportId: ODDS_SOCCER_SPORT_ID, from, to },
   });
   const fixtures = Array.isArray(res.data) ? res.data : (res.data.fixtures || res.data.data || []);
-  console.log('DEBUG findOddsFixture count=' + fixtures.length, 'sample=' + JSON.stringify(fixtures[0]));
+  console.log('DEBUG findOddsFixture count=' + fixtures.length);
 
   const queryA = normalize(nameA);
   const queryB = normalize(nameB);
+  const teamMatches = (teamName, query) => {
+    const n = normalize(teamName || '');
+    return n.includes(query) || query.includes(n);
+  };
 
-  return fixtures.find(f => {
-    const names = (f.participants || f.teams || []).map(p => normalize(p.name || ''));
-    const hasA = names.some(n => n.includes(queryA) || queryA.includes(n));
-    const hasB = names.some(n => n.includes(queryB) || queryB.includes(n));
-    return hasA && hasB;
-  }) || null;
+  return fixtures.find(f =>
+    (teamMatches(f.participant1Name, queryA) && teamMatches(f.participant2Name, queryB)) ||
+    (teamMatches(f.participant1Name, queryB) && teamMatches(f.participant2Name, queryA))
+  ) || null;
 }
 
 async function getOddsForFixture(fixtureId) {
@@ -608,11 +610,15 @@ bot.command('cotes', async (ctx) => {
     const fixture = await findOddsFixture(parts[0].trim(), parts[1].trim());
     if (!fixture) return ctx.reply("Match introuvable dans les prochaines rencontres suivies par OddsPapi.");
 
-    const odds = await getOddsForFixture(fixture.id);
+    if (!fixture.hasOdds) {
+      return ctx.reply(`Match trouvé (${fixture.participant1Name} vs ${fixture.participant2Name}, ${fixture.tournamentName}) mais les cotes ne sont pas encore publiées pour ce match.`);
+    }
+
+    const odds = await getOddsForFixture(fixture.fixtureId);
 
     // Format encore générique tant qu'on n'a pas confirmé la structure exacte de la réponse —
     // renvoie les données brutes (tronquées) pour ajuster l'affichage si besoin.
-    let text = `💰 Cotes — ${parts[0].trim()} vs ${parts[1].trim()}\n\n`;
+    let text = `💰 Cotes — ${fixture.participant1Name} vs ${fixture.participant2Name} (${fixture.tournamentName})\n\n`;
     text += JSON.stringify(odds).slice(0, 1200);
 
     return ctx.reply(text);
