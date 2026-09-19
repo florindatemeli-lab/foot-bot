@@ -148,6 +148,7 @@ async function getMatchesByDate(dateStr) {
     } catch (err) {
       console.error(`Erreur récupération matchs ${comp}:`, err.response?.data || err.message);
     }
+    await new Promise(r => setTimeout(r, 6500)); // respecte la limite 10 req/min
   }
   return allMatches;
 }
@@ -311,8 +312,13 @@ async function searchPlayer(name) {
 // ==================== ODDSPAPI : cotes des bookmakers ====================
 
 async function findOddsFixture(nameA, nameB) {
+  const today = new Date();
+  const in9days = new Date(today.getTime() + 9 * 24 * 60 * 60 * 1000);
+  const from = today.toISOString().split('T')[0];
+  const to = in9days.toISOString().split('T')[0];
+
   const res = await axios.get(`${ODDS_BASE}/fixtures`, {
-    params: { apiKey: oddsApiKey, sportId: ODDS_SOCCER_SPORT_ID },
+    params: { apiKey: oddsApiKey, sportId: ODDS_SOCCER_SPORT_ID, from, to },
   });
   const fixtures = Array.isArray(res.data) ? res.data : (res.data.fixtures || res.data.data || []);
   console.log('DEBUG findOddsFixture count=' + fixtures.length, 'sample=' + JSON.stringify(fixtures[0]));
