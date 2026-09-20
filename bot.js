@@ -22,6 +22,9 @@ const AF_LEAGUES = {
   94: 'Primeira Liga', 40: 'Championship',
 };
 
+// Correspondance code football-data.org -> id ligue API-Football (mêmes 9 compétitions)
+const FD_TO_AF_LEAGUE = { PL: 39, PD: 140, BL1: 78, SA: 135, FL1: 61, CL: 2, DED: 88, PPL: 94, ELC: 40 };
+
 // ==================== CONFIG FOOTBALL-DATA.ORG (classement, buteurs, matchs, analyse) ====================
 
 const FD_BASE = 'https://api.football-data.org/v4';
@@ -85,8 +88,9 @@ async function findAFTeam(name) {
   if (cached) return cached;
 
   try {
-    const res = await axios.get(`${AF_BASE}/teams`, { headers: AF_HEADERS, params: { search: name } });
-    console.log('DEBUG findAFTeam search="' + name + '"', JSON.stringify(res.data.errors), 'results=' + res.data.results);
+    const cleanName = normalize(name); // API-Football rejette les accents/caractères spéciaux
+    const res = await axios.get(`${AF_BASE}/teams`, { headers: AF_HEADERS, params: { search: cleanName } });
+    console.log('DEBUG findAFTeam search="' + cleanName + '"', JSON.stringify(res.data.errors), 'results=' + res.data.results);
     const found = res.data.response?.[0]?.team;
     if (found) {
       afTeamsCache[normalize(found.name)] = found;
@@ -269,9 +273,14 @@ async function getLiveMatches() {
 
 // Le plan gratuit d'API-Football exige désormais une saison pour team+status, et bloque la saison 2026.
 // On contourne en cherchant le match précis par DATE (dérivée de football-data.org), ce qui évite le problème de saison.
-async function findAFFixtureByDateAndTeams(dateStr, teamNameA, teamNameB) {
-  const res = await axios.get(`${AF_BASE}/fixtures`, { headers: AF_HEADERS, params: { date: dateStr } });
-  console.log('DEBUG findAFFixtureByDateAndTeams date=' + dateStr, JSON.stringify(res.data.errors), 'results=' + res.data.results);
+// On filtre par ligue quand on la connaît : sans ça, une journée complète renvoie des milliers de matchs
+// dans le monde entier et la pagination de l'API peut tronquer la réponse avant d'atteindre le bon match.
+async function findAFFixtureByDateAndTeams(dateStr, teamNameA, teamNameB, leagueId) {
+  const params = { date: dateStr };
+  if (leagueId) params.league = leagueId;
+
+  const res = await axios.get(`${AF_BASE}/fixtures`, { headers: AF_HEADERS, params });
+  console.log('DEBUG findAFFixtureByDateAndTeams date=' + dateStr + ' league=' + leagueId, JSON.stringify(res.data.errors), 'results=' + res.data.results);
   const fixtures = res.data.response || [];
 
   const qA = normalize(teamNameA);
@@ -326,12 +335,14 @@ async function findOddsFixture(nameA, nameB) {
   ) || null;
 }
 
-async function getOddsForTournament(tournamentId, bookmaker = 'pinnacle') {
-  const res = await axios.get(`${ODDS_BASE}/odds-by-tournaments`, {
-    params: { apiKey: oddsApiKey, tournamentIds: tournamentId, bookmaker },
+const ODDS_V5_BASE = 'https://v5.oddspapi.io/en';
+
+async function getOddsForFixtureV5(fixtureId) {
+  const res = await axios.get(`${ODDS_V5_BASE}/fixtures/odds`, {
+    params: { apiKey: oddsApiKey, fixtureId },
   });
-  console.log('DEBUG getOddsForTournament tournamentId=' + tournamentId, JSON.stringify(res.data).slice(0, 1500));
-  return Array.isArray(res.data) ? res.data : (res.data.fixtures || res.data.data || []);
+  console.log('DEBUG getOddsForFixtureV5 fixture=' + fixtureId, JSON.stringify(res.data).slice(0, 1500));
+  return res.data;
 }
 
 // ==================== COMMANDES ====================
@@ -353,7 +364,8 @@ bot.command('start', (ctx) => {
     "/arreter <équipe> - stopper les alertes\n\n" +
     "Envoie une date (JJ/MM/AAAA) pour voir les matchs de ce jour-là.\n" +
     "Ou envoie : Équipe1 vs Équipe2\n" +
-    "pour une analyse complète du duel."
+    "pour une analyse complète du duel.\n\n" +
+    "⚠️ NB : vérifie bien l'orthographe exacte des noms d'équipes avant de les envoyer (ex: 'Manchester United' plutôt que 'Man U'), sinon le bot risque de ne pas les trouver."
   );
 });
 
@@ -484,7 +496,7 @@ bot.command('compo', async (ctx) => {
     if (!nextMatch) return ctx.reply(`Aucun match à venir trouvé pour ${team.name}.`);
 
     const dateStr = nextMatch.utcDate.split('T')[0];
-    const afFixture = await findAFFixtureByDateAndTeams(dateStr, nextMatch.homeTeam.name, nextMatch.awayTeam.name);
+    const afFixture = await findAFFixtureByDateAndTeams(dateStr, nextMatch.homeTeam.name, nextMatch.awayTeam.name, FD_TO_AF_LEAGUE[nextMatch.competition.code]);
     if (!afFixture) return ctx.reply("Match trouvé mais introuvable côté API-Football pour récupérer la composition.");
 
     const lineups = await getLineups(afFixture.fixture.id);
@@ -520,7 +532,7 @@ bot.command('resume', async (ctx) => {
     if (!lastMatch) return ctx.reply(`Aucun match terminé trouvé pour ${team.name}.`);
 
     const dateStr = lastMatch.utcDate.split('T')[0];
-    const afFixture = await findAFFixtureByDateAndTeams(dateStr, lastMatch.homeTeam.name, lastMatch.awayTeam.name);
+    const afFixture = await findAFFixtureByDateAndTeams(dateStr, lastMatch.homeTeam.name, lastMatch.awayTeam.name, FD_TO_AF_LEAGUE[lastMatch.competition.code]);
 
     const date = new Date(lastMatch.utcDate).toLocaleDateString('fr-FR');
     let text = `📝 Résumé — ${lastMatch.homeTeam.name} ${lastMatch.score.fullTime.home}-${lastMatch.score.fullTime.away} ${lastMatch.awayTeam.name} (${date})\n\n`;
@@ -561,14 +573,12 @@ bot.command('cotes', async (ctx) => {
       return ctx.reply(`Match trouvé (${fixture.participant1Name} vs ${fixture.participant2Name}, ${fixture.tournamentName}) mais les cotes ne sont pas encore publiées pour ce match.`);
     }
 
-    const odds = await getOddsForTournament(fixture.tournamentId);
-    const match = odds.find(f => f.fixtureId === fixture.fixtureId);
-    if (!match) return ctx.reply("Cotes non trouvées pour ce match précis (réessaie plus près du coup d'envoi).");
+    const odds = await getOddsForFixtureV5(fixture.fixtureId);
 
     // Format encore générique tant qu'on n'a pas confirmé la structure exacte de la réponse —
     // renvoie les données brutes (tronquées) pour ajuster l'affichage si besoin.
     let text = `💰 Cotes — ${fixture.participant1Name} vs ${fixture.participant2Name} (${fixture.tournamentName})\n\n`;
-    text += JSON.stringify(match.bookmakerOdds).slice(0, 1200);
+    text += JSON.stringify(odds).slice(0, 1200);
 
     return ctx.reply(text);
   } catch (error) {
