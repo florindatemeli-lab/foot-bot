@@ -31,7 +31,7 @@ bot.use((ctx, next) => {
   return next();
 });
 
-// ==================== CONFIG API-FOOTBALL (live, compo, blessures, joueur) ====================
+// ==================== CONFIG API-FOOTBALL (live, résumé) ====================
 
 const AF_BASE = 'https://v3.football.api-sports.io';
 const AF_HEADERS = { 'x-apisports-key': apiFootballKey };
@@ -277,7 +277,7 @@ function estimateProbabilities(avgA, avgB) {
   };
 }
 
-// ==================== API-FOOTBALL : live, compo, blessures, joueur, résumé ====================
+// ==================== API-FOOTBALL : live, résumé ====================
 
 async function getLiveMatches() {
   const res = await axios.get(`${AF_BASE}/fixtures`, { headers: AF_HEADERS, params: { live: 'all' } });
@@ -314,12 +314,6 @@ async function findAFFixtureByDateAndTeams(dateStr, teamNameA, teamNameB) {
   ) || null;
 }
 
-async function getLineups(fixtureId) {
-  const res = await axios.get(`${AF_BASE}/fixtures/lineups`, { headers: AF_HEADERS, params: { fixture: fixtureId } });
-  console.log('DEBUG getLineups fixture=' + fixtureId, JSON.stringify(res.data.errors), 'results=' + res.data.results);
-  return res.data.response || [];
-}
-
 async function getMatchEvents(fixtureId) {
   const res = await axios.get(`${AF_BASE}/fixtures/events`, { headers: AF_HEADERS, params: { fixture: fixtureId } });
   console.log('DEBUG getMatchEvents fixture=' + fixtureId, JSON.stringify(res.data.errors), 'results=' + res.data.results);
@@ -336,7 +330,6 @@ bot.command('start', (ctx) => {
     "/calendrier <équipe> - tous les prochains matchs\n" +
     "/classement <championnat> - classement actuel\n" +
     "/buteurs <championnat> - top buteurs\n" +
-    "/compo <équipe> - composition du prochain match\n" +
     "/resume <équipe> - résumé du dernier match\n" +
     "/live - scores en direct\n" +
     "/today - tous les matchs du jour\n" +
@@ -487,41 +480,6 @@ bot.command('calendrier', async (ctx) => {
   } catch (error) {
     console.error(error.response?.data || error.message);
     return ctx.reply("Erreur lors de la récupération du calendrier.");
-  }
-});
-
-bot.command('compo', async (ctx) => {
-  const teamName = ctx.message.text.replace('/compo', '').trim();
-  if (!teamName) return ctx.reply("Utilise : /compo Real Madrid");
-
-  try {
-    const team = findTeam(teamName);
-    if (!team) return ctx.reply(`Équipe "${teamName}" introuvable.`);
-
-    const nextMatch = await getNextMatch(team.id);
-    if (!nextMatch) return ctx.reply(`Aucun match à venir trouvé pour ${team.name}.`);
-
-    const dateStr = nextMatch.utcDate.split('T')[0];
-    const afFixture = await findAFFixtureByDateAndTeams(dateStr, nextMatch.homeTeam.name, nextMatch.awayTeam.name);
-    if (!afFixture) return ctx.reply("Match trouvé mais introuvable côté API-Football pour récupérer la composition.");
-
-    const lineups = await getLineups(afFixture.fixture.id);
-    if (lineups.length === 0) {
-      return ctx.reply("Composition pas encore disponible (généralement publiée ~1h avant le coup d'envoi).");
-    }
-
-    let text = `📋 Compositions — ${nextMatch.homeTeam.name} vs ${nextMatch.awayTeam.name}\n\n`;
-    lineups.forEach(l => {
-      text += `${l.team.name} (${l.formation}) — Coach : ${l.coach.name}\n`;
-      l.startXI.forEach(p => { text += `  ${p.player.number}. ${p.player.name} (${p.player.pos})\n`; });
-      text += '\n';
-    });
-
-    if (text.length > 4000) text = text.slice(0, 4000) + '\n...(tronqué)';
-    return ctx.reply(text);
-  } catch (error) {
-    console.error(error.response?.data || error.message);
-    return ctx.reply("Erreur lors de la récupération de la composition.");
   }
 });
 
