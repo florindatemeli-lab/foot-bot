@@ -286,19 +286,23 @@ async function getLiveMatches() {
   return matches.filter(m => AF_LEAGUES[m.league.id]);
 }
 
-// Le plan gratuit d'API-Football exige désormais une saison pour team+status, et bloque la saison 2026.
-// On contourne en cherchant le match précis par DATE (dérivée de football-data.org), ce qui évite le problème de saison.
-// On filtre par ligue quand on la connaît : sans ça, une journée complète renvoie des milliers de matchs
-// dans le monde entier et la pagination de l'API peut tronquer la réponse avant d'atteindre le bon match.
-async function findAFFixtureByDateAndTeams(dateStr, teamNameA, teamNameB, leagueId) {
-  const params = { date: dateStr };
-  if (leagueId) params.league = leagueId;
+// Le plan gratuit d'API-Football exige désormais une saison dès qu'on ajoute league OU status,
+// et bloque justement la saison en cours (2026). On contourne en cherchant l'équipe par DATE + ID d'équipe
+// (ni league, ni season, ni status), ce qui reste autorisé sur le plan gratuit.
+async function findAFFixtureByDateAndTeams(dateStr, teamNameA, teamNameB) {
+  const teamA = await findAFTeam(teamNameA);
+  if (!teamA) {
+    console.log('DEBUG findAFFixtureByDateAndTeams: équipe A introuvable côté API-Football:', teamNameA);
+    return null;
+  }
 
-  const res = await axios.get(`${AF_BASE}/fixtures`, { headers: AF_HEADERS, params });
-  console.log('DEBUG findAFFixtureByDateAndTeams date=' + dateStr + ' league=' + leagueId, JSON.stringify(res.data.errors), 'results=' + res.data.results);
+  const res = await axios.get(`${AF_BASE}/fixtures`, {
+    headers: AF_HEADERS,
+    params: { team: teamA.id, date: dateStr },
+  });
+  console.log('DEBUG findAFFixtureByDateAndTeams date=' + dateStr + ' team=' + teamA.id, JSON.stringify(res.data.errors), 'results=' + res.data.results);
   const fixtures = res.data.response || [];
 
-  const qA = normalize(teamNameA);
   const qB = normalize(teamNameB);
   const teamMatches = (n, q) => {
     const nn = normalize(n || '');
@@ -306,8 +310,7 @@ async function findAFFixtureByDateAndTeams(dateStr, teamNameA, teamNameB, league
   };
 
   return fixtures.find(f =>
-    (teamMatches(f.teams.home.name, qA) && teamMatches(f.teams.away.name, qB)) ||
-    (teamMatches(f.teams.home.name, qB) && teamMatches(f.teams.away.name, qA))
+    teamMatches(f.teams.home.name, qB) || teamMatches(f.teams.away.name, qB)
   ) || null;
 }
 
@@ -499,7 +502,7 @@ bot.command('compo', async (ctx) => {
     if (!nextMatch) return ctx.reply(`Aucun match à venir trouvé pour ${team.name}.`);
 
     const dateStr = nextMatch.utcDate.split('T')[0];
-    const afFixture = await findAFFixtureByDateAndTeams(dateStr, nextMatch.homeTeam.name, nextMatch.awayTeam.name, FD_TO_AF_LEAGUE[nextMatch.competition.code]);
+    const afFixture = await findAFFixtureByDateAndTeams(dateStr, nextMatch.homeTeam.name, nextMatch.awayTeam.name);
     if (!afFixture) return ctx.reply("Match trouvé mais introuvable côté API-Football pour récupérer la composition.");
 
     const lineups = await getLineups(afFixture.fixture.id);
@@ -535,7 +538,7 @@ bot.command('resume', async (ctx) => {
     if (!lastMatch) return ctx.reply(`Aucun match terminé trouvé pour ${team.name}.`);
 
     const dateStr = lastMatch.utcDate.split('T')[0];
-    const afFixture = await findAFFixtureByDateAndTeams(dateStr, lastMatch.homeTeam.name, lastMatch.awayTeam.name, FD_TO_AF_LEAGUE[lastMatch.competition.code]);
+    const afFixture = await findAFFixtureByDateAndTeams(dateStr, lastMatch.homeTeam.name, lastMatch.awayTeam.name);
 
     const date = new Date(lastMatch.utcDate).toLocaleDateString('fr-FR');
     let text = `📝 Résumé — ${lastMatch.homeTeam.name} ${lastMatch.score.fullTime.home}-${lastMatch.score.fullTime.away} ${lastMatch.awayTeam.name} (${date})\n\n`;
