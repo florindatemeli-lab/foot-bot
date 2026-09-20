@@ -5,11 +5,31 @@ const axios = require('axios');
 const token = process.env.TELEGRAM_TOKEN;
 const apiFootballKey = process.env.FOOTBALL_API_KEY;       // API-Football (x-apisports-key)
 const footballDataKey = process.env.FOOTBALL_DATA_API_KEY; // football-data.org (X-Auth-Token)
-const oddsApiKey = process.env.ODDSPAPI_API_KEY;           // OddsPapi (?apiKey=...)
+const adminId = process.env.ADMIN_TELEGRAM_ID;             // ID Telegram numérique de l'admin (obtenu via @userinfobot)
 
 const bot = new Telegraf(token);
 
 console.log('Bot démarré...');
+
+// ==================== TRACKING UTILISATEURS (pour /stats) ====================
+// NB: stockage en mémoire uniquement -> remis à zéro à chaque redéploiement Railway.
+
+const usersSeen = new Map(); // userId -> { firstSeen: Date, lastSeen: Date }
+const ACTIVE_WINDOW_MS = 24 * 60 * 60 * 1000; // 24h
+
+bot.use((ctx, next) => {
+  const userId = ctx.from?.id;
+  if (userId) {
+    const now = new Date();
+    const existing = usersSeen.get(userId);
+    if (existing) {
+      existing.lastSeen = now;
+    } else {
+      usersSeen.set(userId, { firstSeen: now, lastSeen: now });
+    }
+  }
+  return next();
+});
 
 // ==================== CONFIG API-FOOTBALL (live, compo, blessures, joueur) ====================
 
@@ -35,11 +55,6 @@ const FD_COMP_NAMES = {
   PL: 'Premier League', PD: 'La Liga', BL1: 'Bundesliga', SA: 'Serie A', FL1: 'Ligue 1',
   CL: 'Champions League', DED: 'Eredivisie', PPL: 'Primeira Liga', ELC: 'Championship',
 };
-
-// ==================== CONFIG ODDSPAPI (cotes des bookmakers) ====================
-
-const ODDS_BASE = 'https://api.oddspapi.io/v4';
-const ODDS_SOCCER_SPORT_ID = 10;
 
 function normalize(str) {
   return str.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
@@ -308,43 +323,6 @@ async function getMatchEvents(fixtureId) {
   return res.data.response || [];
 }
 
-// ==================== ODDSPAPI : cotes des bookmakers ====================
-
-async function findOddsFixture(nameA, nameB) {
-  const today = new Date();
-  const in9days = new Date(today.getTime() + 9 * 24 * 60 * 60 * 1000);
-  const from = today.toISOString().split('T')[0];
-  const to = in9days.toISOString().split('T')[0];
-
-  const res = await axios.get(`${ODDS_BASE}/fixtures`, {
-    params: { apiKey: oddsApiKey, sportId: ODDS_SOCCER_SPORT_ID, from, to },
-  });
-  const fixtures = Array.isArray(res.data) ? res.data : (res.data.fixtures || res.data.data || []);
-  console.log('DEBUG findOddsFixture count=' + fixtures.length);
-
-  const queryA = normalize(nameA);
-  const queryB = normalize(nameB);
-  const teamMatches = (teamName, query) => {
-    const n = normalize(teamName || '');
-    return n.includes(query) || query.includes(n);
-  };
-
-  return fixtures.find(f =>
-    (teamMatches(f.participant1Name, queryA) && teamMatches(f.participant2Name, queryB)) ||
-    (teamMatches(f.participant1Name, queryB) && teamMatches(f.participant2Name, queryA))
-  ) || null;
-}
-
-const ODDS_V5_BASE = 'https://v5.oddspapi.io/en';
-
-async function getOddsForFixtureV5(fixtureId) {
-  const res = await axios.get(`${ODDS_V5_BASE}/fixtures/odds`, {
-    params: { apiKey: oddsApiKey, fixtureId },
-  });
-  console.log('DEBUG getOddsForFixtureV5 fixture=' + fixtureId, JSON.stringify(res.data).slice(0, 1500));
-  return res.data;
-}
-
 // ==================== COMMANDES ====================
 
 bot.command('start', (ctx) => {
@@ -357,7 +335,6 @@ bot.command('start', (ctx) => {
     "/buteurs <championnat> - top buteurs\n" +
     "/compo <équipe> - composition du prochain match\n" +
     "/resume <équipe> - résumé du dernier match\n" +
-    "/cotes <équipe1> vs <équipe2> - cotes des bookmakers\n" +
     "/live - scores en direct\n" +
     "/today - tous les matchs du jour\n" +
     "/suivre <équipe> - alertes buts en direct\n" +
@@ -366,6 +343,32 @@ bot.command('start', (ctx) => {
     "Ou envoie : Équipe1 vs Équipe2\n" +
     "pour une analyse complète du duel.\n\n" +
     "⚠️ NB : vérifie bien l'orthographe exacte des noms d'équipes avant de les envoyer (ex: 'Manchester United' plutôt que 'Man U'), sinon le bot risque de ne pas les trouver."
+  );
+});
+
+bot.command('stats', (ctx) => {
+  const userId = ctx.from?.id;
+  if (!adminId || String(userId) !== String(adminId)) {
+    return; // ignore silencieusement si pas admin
+  }
+
+  const now = Date.now();
+  const total = usersSeen.size;
+  let newToday = 0;
+  let active = 0;
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+
+  for (const { firstSeen, lastSeen } of usersSeen.values()) {
+    if (firstSeen >= startOfToday) newToday++;
+    if (now - lastSeen.getTime() <= ACTIVE_WINDOW_MS) active++;
+  }
+
+  return ctx.reply(
+    "📊 STATISTIQUES FOOT PRONO\n\n" +
+    `👥 Utilisateurs inscrits : ${total}\n` +
+    `🆕 Nouveaux aujourd'hui : ${newToday}\n` +
+    `📈 Utilisateurs actifs (24h) : ${active}`
   );
 });
 
@@ -557,33 +560,6 @@ bot.command('resume', async (ctx) => {
   } catch (error) {
     console.error(error.response?.data || error.message);
     return ctx.reply("Erreur lors de la récupération du résumé.");
-  }
-});
-
-bot.command('cotes', async (ctx) => {
-  const query = ctx.message.text.replace('/cotes', '').trim();
-  const parts = query.split(/\s+vs\s+/i);
-  if (parts.length !== 2) return ctx.reply("Utilise : /cotes Real Madrid vs Barcelone");
-
-  try {
-    const fixture = await findOddsFixture(parts[0].trim(), parts[1].trim());
-    if (!fixture) return ctx.reply("Match introuvable dans les prochaines rencontres suivies par OddsPapi.");
-
-    if (!fixture.hasOdds) {
-      return ctx.reply(`Match trouvé (${fixture.participant1Name} vs ${fixture.participant2Name}, ${fixture.tournamentName}) mais les cotes ne sont pas encore publiées pour ce match.`);
-    }
-
-    const odds = await getOddsForFixtureV5(fixture.fixtureId);
-
-    // Format encore générique tant qu'on n'a pas confirmé la structure exacte de la réponse —
-    // renvoie les données brutes (tronquées) pour ajuster l'affichage si besoin.
-    let text = `💰 Cotes — ${fixture.participant1Name} vs ${fixture.participant2Name} (${fixture.tournamentName})\n\n`;
-    text += JSON.stringify(odds).slice(0, 1200);
-
-    return ctx.reply(text);
-  } catch (error) {
-    console.error(error.response?.data || error.message);
-    return ctx.reply("Erreur lors de la récupération des cotes.");
   }
 });
 
